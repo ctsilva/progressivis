@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import numpy as np
 
 from progressivis import (
@@ -47,6 +49,7 @@ class TestScatterPlot(ProgressiveTest):
         assert csv.result is not None
         self.assertEqual(len(csv.result), 30_000)
 
+    @pytest.mark.slow
     def test_scatterplot2(self) -> None:
         s = self.clean_scheduler
         np.random.seed(42)

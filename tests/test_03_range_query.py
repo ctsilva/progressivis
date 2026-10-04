@@ -1,6 +1,8 @@
 "Test for Range Query"
 from __future__ import annotations
 
+import pytest
+
 from progressivis import (
     Tick,
     Scheduler,
@@ -124,6 +126,7 @@ class TestRangeQuery(ProgressiveTest):
         assert range_qry.result is not None
         self.assertEqual(range_qry.result.index, PIntSet(idx))
 
+    @pytest.mark.slow
     def test_range_query_all_default_04_06(self) -> None:
         "Run tests of the RangeQuery module"
         self._range_query_impl_all_default(0.4, 0.6)

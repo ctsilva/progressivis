@@ -1,3 +1,4 @@
+import pytest
 from . import ProgressiveTest
 
 from progressivis.core import aio
@@ -40,6 +41,7 @@ class TestStatsFactory(ProgressiveTest):
         aio.run(s.start())
         print(s.modules())
 
+    @pytest.mark.slow
     def test_sf(self) -> None:
         np.random.seed(42)
         s = self.scheduler
@@ -61,6 +63,7 @@ class TestStatsFactory(ProgressiveTest):
         aio.run(s.start())
         print(s.modules())
 
+    @pytest.mark.slow
     def test_pattern(self) -> None:
         s = self.scheduler
         n_samples = 1_000

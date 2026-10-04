@@ -15,20 +15,31 @@ from typing import Optional, Any, List, Sequence
 # cols = 30
 
 
+def partial_name(filename: str) -> str:
+    """
+    Temporary name to write ``filename`` to before renaming it into place, so
+    concurrent processes (e.g. parallel test workers) never read a partial file.
+    """
+    return f"{filename}.{os.getpid()}.part"
+
+
 def generate_random_csv(
     filename: str, rows: int = 900_000, cols: int = 10, seed: int = 1234
 ) -> str:
     if os.path.exists(filename):
         return filename
+    tmp = partial_name(filename)
     try:
-        with open(filename, "w", newline='') as csvfile:
+        with open(tmp, "w", newline='') as csvfile:
             writer = csv.writer(csvfile)
             np.random.seed(seed=seed)
             for _ in range(0, rows):
                 row = list(np.random.normal(loc=0.5, scale=0.8, size=cols))
                 writer.writerow(row)
-    except (KeyboardInterrupt, SystemExit):
-        os.remove(filename)
+        os.replace(tmp, filename)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise
     return filename
 
@@ -37,7 +48,9 @@ def generate_random_parquet(filename: str, csv_file: str, n_cols: int) -> str:
     if os.path.exists(filename):
         return filename
     df = pd.read_csv(csv_file, names=[f"_{i}" for i in range(n_cols)])
-    df.to_parquet(filename)
+    tmp = partial_name(filename)
+    df.to_parquet(tmp)
+    os.replace(tmp, filename)
     return filename
 
 
@@ -73,7 +86,9 @@ def generate_random_multivariate_normal_csv(
     )
     np.random.shuffle(X)
     kw = {} if header is None else dict(header=header, comments="")
-    np.savetxt(filename, X, delimiter=",", **kw)
+    tmp = partial_name(filename)
+    np.savetxt(tmp, X, delimiter=",", **kw)
+    os.replace(tmp, filename)
     return filename
 
 
@@ -97,10 +112,13 @@ def generate_multiscale_random_csv(
             "S": np.random.choice(choice, rows),
         }
     )
+    tmp = partial_name(filename)
     try:
-        df.to_csv(filename, index=False)
-    except (KeyboardInterrupt, SystemExit):
-        os.remove(filename)
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, filename)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise
     return filename
 
@@ -124,9 +142,12 @@ def generate_digits_csv(filename: str, rows: int = 20_000, seed: int = 1234) -> 
         columns=[f"pixel{i}" for i in range(digits.data.shape[1])],
     )
     df["class"] = digits.target[pick]
+    tmp = partial_name(filename)
     try:
-        df.to_csv(filename, index=False)
-    except (KeyboardInterrupt, SystemExit):
-        os.remove(filename)
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, filename)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
         raise
     return filename

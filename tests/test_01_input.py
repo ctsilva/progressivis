@@ -1,3 +1,4 @@
+import pytest
 from . import ProgressiveTest
 
 from progressivis import Tick
@@ -17,6 +18,7 @@ async def _do_line(inp: Input, s: Scheduler) -> None:
 
 
 class TestInput(ProgressiveTest):
+    @pytest.mark.slow
     def test_input(self) -> None:
         s = self.scheduler
         with s:

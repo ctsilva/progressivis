@@ -15,8 +15,10 @@ def wget_file(filename: str, url: str) -> str:
         try:
             response = request.urlopen(url, timeout=5)
             content = response.read()
-            with open(filename, "wb") as file:
+            tmp = f"{filename}.{os.getpid()}.part"  # see random.partial_name
+            with open(tmp, "wb") as file:
                 file.write(content)
+            os.replace(tmp, filename)
             break
         except error.URLError as exc:
             attempts += 1

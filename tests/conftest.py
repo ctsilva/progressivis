@@ -54,6 +54,34 @@ def _describe_scheduler(scheduler: Any) -> str:
     return "\n".join(lines)
 
 
+def pytest_collection_finish(session: pytest.Session) -> None:
+    # ProgressiveTest.tearDown runs gc.collect() after every test. Freezing the
+    # objects that exist once everything is imported (~200k: numpy, pandas,
+    # sklearn, progressivis) makes those collections scan only what each test
+    # created: ~25-50 ms -> ~1 ms per test.
+    import gc
+
+    gc.collect()
+    gc.freeze()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # Hand the frozen objects back before interpreter shutdown: finalizing them
+    # from the permanent generation crashes some C extensions at exit.
+    import gc
+
+    gc.unfreeze()
+
+
+SLOW_TEST_TIMEOUT = 120  # seconds; the default (pyproject.toml) is for quick tests
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if item.get_closest_marker("slow") and not item.get_closest_marker("timeout"):
+            item.add_marker(pytest.mark.timeout(SLOW_TEST_TIMEOUT))
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]

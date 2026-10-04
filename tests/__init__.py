@@ -86,9 +86,10 @@ def taxi_sample(dataset: str) -> str:
     stem, ext = os.path.splitext(source)
     target = f"{stem}_{rows}{ext}"
     if not os.path.exists(target):
+        tmp = f"{target}.{os.getpid()}.part"
         table = pq.read_table(source).slice(0, rows)  # type: ignore
-        pq.write_table(table, target + ".tmp")  # type: ignore
-        os.replace(target + ".tmp", target)
+        pq.write_table(table, tmp)  # type: ignore
+        os.replace(tmp, target)
     return target
 
 
@@ -100,8 +101,9 @@ def taxi_csv_sample() -> str:
     source = taxi_sample("short-taxis2015-01_parquet")
     target = os.path.splitext(source)[0] + ".csv.bz2"
     if not os.path.exists(target):
-        pd.read_parquet(source).to_csv(target + ".tmp", index=False, compression="bz2")
-        os.replace(target + ".tmp", target)
+        tmp = f"{target}.{os.getpid()}.part"
+        pd.read_parquet(source).to_csv(tmp, index=False, compression="bz2")
+        os.replace(tmp, target)
     return target
 
 _ = skip  # shut-up pylint

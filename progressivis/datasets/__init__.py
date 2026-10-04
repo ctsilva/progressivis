@@ -11,6 +11,7 @@ from .random import (
     generate_random_multivariate_normal_csv,
     generate_multiscale_random_csv,
     generate_digits_csv,
+    partial_name,
 )
 from .wget import wget_file
 import bz2
@@ -133,6 +134,11 @@ def get_dataset(name: str, **kwds: Any) -> str:
                  "newstyle_500k_yellow_tripdata_2015-01.parquet")
         )
 
+    if name == "taxi-zone-lookup":
+        return wget_file(
+            filename=os.path.join(DATA_DIR, "taxi-zone-lookup.csv.bz2"),
+            url="https://www.aviz.fr/nyc-taxi/taxi-zone-lookup.csv.bz2",
+        )
     if name == "warlogs":
         return wget_file(
             filename=os.path.join(DATA_DIR, "warlogs.vec.bz2"),
@@ -183,13 +189,14 @@ def get_dataset_compressed(
     factory = cast(Type[Compressor], compressor["factory"])
     comp = factory()
     with open(source_file, "rb") as rdesc:
-        with open(dest_file, "wb") as wdesc:
+        with open(partial_name(dest_file), "wb") as wdesc:
             while True:
                 data = rdesc.read(Z_CHUNK_SIZE)
                 if not data:
                     break
                 wdesc.write(comp.compress(data))
             wdesc.write(comp.flush())
+    os.replace(partial_name(dest_file), dest_file)
     return dest_file
 
 

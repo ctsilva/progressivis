@@ -1,3 +1,4 @@
+import pytest
 from . import ProgressiveTest, skipIf, LocalHTTPServer, free_port
 
 import time
@@ -73,6 +74,7 @@ def make_url(name: str, ext: str = "csv") -> str:
 
 
 @skipIf(os.getenv("CI"), "cannot run an HTTP local server anymore on CI ...")
+@pytest.mark.slow
 class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
     def setUp(self) -> None:
         super(TestProgressiveLoadCSVOverHTTP, self).setUp()

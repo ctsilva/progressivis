@@ -66,6 +66,15 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 - [x] `tests/test_04_progressive_guarantees.py`: prefix consistency (Min, Max, Var, 3 random step-size seeds
       each), eventual exactness, interleaving independence (GroupBy→Aggregate with delete: xfail, Finding 7)
 
+- [x] Quick by default: `pytest tests` runs 538 tests in ~12 s (was 18 min).
+      - 10 tests over 1 s are marked `slow` and skipped (`pytest -m slow` runs them, `-m ''` runs all)
+      - per-test timeout 10 s (120 s for `slow`), so a hang fails in seconds
+      - `gc.freeze()` after collection: `ProgressiveTest.tearDown`'s `gc.collect()` went from ~25-50 ms to ~1 ms
+      - 4 parallel workers by default (`pytest-xdist`, `-n 0` to debug); dataset files are written to a
+        per-process temp name and renamed, so workers can generate them concurrently on a fresh checkout
+      - taxi zone lookup CSV cached as dataset `taxi-zone-lookup` (join tests no longer hit the network)
+      - note: CI's `coverage run -m pytest` only measures the main process with xdist
+
 ### Known failures on master (macOS, Python 3.14, pandas 3.0.6, pyarrow 25)
 
 - ~~`test_00_storageengine::test_storage_engines`~~ — fixed

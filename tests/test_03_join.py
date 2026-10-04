@@ -4,7 +4,7 @@ import os
 from . import ProgressiveTest, skipIf, taxi_sample
 from progressivis.core import aio
 from progressivis import (
-    Sink, ParquetLoader, SimpleCSVLoader, Join
+    Sink, ParquetLoader, SimpleCSVLoader, Join, get_dataset
 )
 
 import pandas as pd
@@ -16,7 +16,7 @@ from typing import Any, Sequence, Tuple, List, cast
 # PARQUET_FILE = "nyc-taxi/newstyle_500k_yellow_tripdata_2015-01.parquet"
 PARQUET_FILE = taxi_sample("newshort-taxis2015-01_parquet")
 # CSV_URL = "https://s3.amazonaws.com/nyc-tlc/misc/taxi+_zone_lookup.csv"
-CSV_URL = "https://www.aviz.fr/nyc-taxi/taxi-zone-lookup.csv.bz2"
+CSV_URL = get_dataset("taxi-zone-lookup")  # downloaded once into data/
 # CSV_URL = "../nyc-taxi/taxi+_zone_lookup.csv"
 # NB: if PARQUET_FILE does not exist yet, consider running:
 # python scripts/create_nyc_parquet.py -p newstyle -t yellow -m1 -n 300000

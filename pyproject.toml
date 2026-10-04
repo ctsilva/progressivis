@@ -74,6 +74,7 @@ test = [
     "pytest",
     "pytest_cov",
     "pytest-timeout",
+    "pytest-xdist",
     "duckdb",
     "rangehttpserver",
 ]
@@ -152,7 +153,12 @@ only-include = [
 [tool.pytest.ini_options]
 # ProgressiVis dataflows must never hang: any test running longer than this
 # fails with a stack dump and the scheduler state (see tests/conftest.py).
-timeout = 600
+# Quick tests take well under 1 s; tests marked slow get 120 s (conftest.py).
+timeout = 10
+markers = ["slow: takes more than ~1 s; skipped by default, run with: pytest -m slow (or -m '' for all)"]
+# 4 parallel workers (the number of performance cores on a typical laptop);
+# use -n 0 to debug a single test in-process.
+addopts = "-m 'not slow' -n 4"
 
 [tool.ruff]
 extend-exclude = ["notebooks"]
