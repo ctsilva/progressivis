@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from os import getenv
+from os import getenv, environ
 import gc
 import sys
 from unittest import TestCase, main
 from unittest import skip as skip
 from unittest import skipIf as skipIf
 import logging
+
+# The generated "bigfile" dataset has 1M rows by default; 100k rows exercise
+# the same code paths much faster. Set PROGRESSIVIS_BIGFILE_ROWS to override.
+environ.setdefault("PROGRESSIVIS_BIGFILE_ROWS", "100000")
 
 from progressivis import Scheduler, log_level
 from progressivis.storage import init_temp_dir_if, cleanup_temp_dir

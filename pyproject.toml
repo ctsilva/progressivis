@@ -73,6 +73,7 @@ scripts = ["click"]
 test = [
     "pytest",
     "pytest_cov",
+    "pytest-timeout",
     "duckdb",
     "rangehttpserver",
 ]
@@ -147,6 +148,11 @@ only-include = [
     "progressivis.cluster",
     "progressivis.table",
 ]
+
+[tool.pytest.ini_options]
+# ProgressiVis dataflows must never hang: any test running longer than this
+# fails with a stack dump and the scheduler state (see tests/conftest.py).
+timeout = 600
 
 [tool.ruff]
 extend-exclude = ["notebooks"]

@@ -5,6 +5,7 @@ from progressivis.core.api import Sink
 from progressivis.core import aio
 
 from progressivis import PACSVLoader, Constant, PTable, get_dataset
+from progressivis.datasets import bigfile_rows
 from progressivis.core.utils import RandomBytesIO
 
 
@@ -43,7 +44,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         aio.run(s.start())
         assert module.result is not None
         # import pdb;pdb.set_trace()
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_fake_csv(self) -> None:
         s = self.scheduler

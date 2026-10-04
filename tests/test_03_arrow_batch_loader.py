@@ -6,6 +6,7 @@ from progressivis.core.api import Sink
 from progressivis.core import aio
 
 from progressivis import ArrowBatchLoader, get_dataset
+from progressivis.datasets import bigfile_rows
 
 
 class TestArrowBatchLoader(ProgressiveTest):
@@ -31,7 +32,7 @@ class TestArrowBatchLoader(ProgressiveTest):
     def test_read_csv(self) -> None:
         con = duckdb.connect(database=":memory:")
         file_name = get_dataset("bigfile")
-        n_rows = 1_000_000
+        n_rows = bigfile_rows()
         con.execute(f"SELECT * FROM read_csv('{file_name}')")
         reader = con.fetch_record_batch(1000)
         s = self.scheduler
@@ -51,7 +52,7 @@ class TestArrowBatchLoader(ProgressiveTest):
     def test_read_csv_2_cols(self) -> None:
         con = duckdb.connect(database=":memory:")
         file_name = get_dataset("bigfile")
-        n_rows = 1_000_000
+        n_rows = bigfile_rows()
         con.execute(f"SELECT column01, column02 FROM read_csv('{file_name}')")
         reader = con.fetch_record_batch(1000)
         s = self.scheduler

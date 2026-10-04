@@ -20,6 +20,22 @@ from typing import Any, Dict, cast, Type
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                         "../../data"))
 Z_CHUNK_SIZE = 16 * 1024 * 32
+BIGFILE_DEFAULT_ROWS = 1_000_000
+
+
+def bigfile_rows() -> int:
+    """Number of rows of the generated "bigfile" datasets.
+
+    Defaults to 1,000,000. The environment variable PROGRESSIVIS_BIGFILE_ROWS
+    overrides it (the test suite uses a smaller file). A non-default size is
+    part of the file name, so files of different sizes never get mixed up.
+    """
+    return int(os.environ.get("PROGRESSIVIS_BIGFILE_ROWS", BIGFILE_DEFAULT_ROWS))
+
+
+def _bigfile_stem() -> str:
+    rows = bigfile_rows()
+    return "bigfile" if rows == BIGFILE_DEFAULT_ROWS else f"bigfile_{rows}"
 
 
 def _check_kwds(kwds: Dict[str, Any], **defaults: Any) -> Dict[str, Any]:
@@ -40,20 +56,20 @@ def get_dataset(name: str, **kwds: Any) -> str:
     if not os.path.isdir(DATA_DIR):
         os.mkdir(DATA_DIR)
     if name == "bigfile":
-        kw = _check_kwds(kwds, rows=1_000_000, cols=30)
+        kw = _check_kwds(kwds, rows=bigfile_rows(), cols=30)
         return generate_random_csv(
-            os.path.join(DATA_DIR, "bigfile.csv"),
+            os.path.join(DATA_DIR, f"{_bigfile_stem()}.csv"),
             **kw
         )
     if name == "bigfile_parquet":
         n_cols = 30
-        kw = _check_kwds(kwds, rows=1_000_000, cols=n_cols)
+        kw = _check_kwds(kwds, rows=bigfile_rows(), cols=n_cols)
         csv_file = generate_random_csv(
-            os.path.join(DATA_DIR, "bigfile.csv"),
+            os.path.join(DATA_DIR, f"{_bigfile_stem()}.csv"),
             **kw
         )
         return generate_random_parquet(
-            os.path.join(DATA_DIR, "bigfile.parquet"),
+            os.path.join(DATA_DIR, f"{_bigfile_stem()}.parquet"),
             csv_file, n_cols=n_cols
         )
     if name == "bigfile_multiscale":
@@ -191,6 +207,7 @@ def get_dataset_lzma(name: str, **kwds: Any) -> str:
 
 __all__ = [
     "get_dataset",
+    "bigfile_rows",
     "get_dataset_bz2",
     "get_dataset_zlib",
     "get_dataset_gz",

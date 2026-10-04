@@ -3,6 +3,7 @@ from __future__ import annotations
 from . import ProgressiveTest
 from progressivis.core import aio
 from progressivis import ParquetLoader, Constant, PTable, get_dataset, Sink
+from progressivis.datasets import bigfile_rows
 from pyarrow import RecordBatch
 
 
@@ -39,7 +40,7 @@ class TestProgressiveLoadParquet(ProgressiveTest):
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000_000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_parquet_check_size(self) -> None:
         num_rows_list = []
@@ -64,7 +65,7 @@ class TestProgressiveLoadParquet(ProgressiveTest):
         num_rows_set = set(num_rows_list[:-1])
         self.assertEqual(len(num_rows_set), 1)
         self.assertEqual(num_rows_set.pop(), fixed_batch_size)
-        self.assertEqual(len(module.result), 1000_000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_parquet_with_cols(self) -> None:
         s = self.scheduler
@@ -80,7 +81,7 @@ class TestProgressiveLoadParquet(ProgressiveTest):
         aio.run(s.start())
         assert module.result is not None
         self.assertEqual(module.result.columns, columns)
-        self.assertEqual(len(module.result), 1000_000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_multiple_parquet(self) -> None:
         s = self.scheduler

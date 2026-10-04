@@ -3,6 +3,7 @@ from __future__ import annotations
 from . import ProgressiveTest, skip
 
 from progressivis import Tick, CSVLoader, PDict, Select, ConstDict, Sample, get_dataset, PIntSet
+from progressivis.datasets import bigfile_rows
 from progressivis.core import aio
 
 from typing import Any
@@ -49,7 +50,7 @@ class TestSelect(ProgressiveTest):
         prlen.input[0] = q.output.df
         aio.run(s.start())
         assert q.result is not None
-        self.assertTrue(len(q.result) < 1000000)
+        self.assertTrue(len(q.result) < bigfile_rows())
 
 
 if __name__ == "__main__":

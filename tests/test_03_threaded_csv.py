@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from . import ProgressiveTest, skipIf
 from progressivis import Sink, ThreadedCSVLoader, get_dataset
+from progressivis.datasets import bigfile_rows
 from progressivis.core import aio
 import os
 import sys
@@ -43,7 +44,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_csv_taxis(self) -> None:
         s = self.scheduler

@@ -9,6 +9,7 @@ from . import ProgressiveTest, skip, skipIf
 from progressivis import CSVLoader, Sink, Scheduler
 from progressivis.datasets import (
     get_dataset,
+    bigfile_rows,
     get_dataset_bz2,
     get_dataset_gz,
     get_dataset_lzma,
@@ -60,8 +61,10 @@ def trace_after_stop(s: Scheduler) -> None:
 
 
 def make_url(name: str, ext: str = "csv") -> str:
+    # The file name depends on the dataset size (see bigfile_rows())
+    stem = os.path.splitext(os.path.basename(get_dataset(name)))[0]
     return "http://{host}:{port}/{name}.{ext}".format(
-        host=HOST, port=PORT, name=name, ext=ext
+        host=HOST, port=PORT, name=stem, ext=ext
     )
 
 
@@ -160,7 +163,7 @@ class TestProgressiveLoadCSVCrash1(ProgressiveLoadCSVCrashRoot):
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000_000)
+        self.assertEqual(len(module.result), bigfile_rows())
         col = module.result.loc[:, 0]
         assert col is not None
         arr1 = col.to_array().reshape(-1)
@@ -198,8 +201,8 @@ class TestProgressiveLoadCSVCrash1(ProgressiveLoadCSVCrashRoot):
         aio.run(s.start())
         assert csv.result is not None
         assert counter.result is not None
-        self.assertEqual(len(csv.result), 1000_000)
-        self.assertEqual(counter.result["counter"].loc[0], 1000_000)
+        self.assertEqual(len(csv.result), bigfile_rows())
+        self.assertEqual(counter.result["counter"].loc[0], bigfile_rows())
 
     @skipIf(not IS_PERSISTENT, "transient storage, test skipped")
     def test_02_read_http_csv_bz2_with_crash(self) -> None:
@@ -229,7 +232,7 @@ class TestProgressiveLoadCSVCrash1(ProgressiveLoadCSVCrashRoot):
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000_000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     @skipIf(not IS_PERSISTENT, "transient storage, test skipped")
     def test_03_read_http_multi_csv_no_crash(self) -> None:

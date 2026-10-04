@@ -11,7 +11,7 @@ import http.server as http_srv
 from progressivis.core import aio
 
 from progressivis import CSVLoader, Sink, Constant, PTable
-from progressivis.datasets import get_dataset, get_dataset_bz2, DATA_DIR
+from progressivis.datasets import get_dataset, get_dataset_bz2, DATA_DIR, bigfile_rows
 
 from typing import Any, Optional
 
@@ -63,8 +63,10 @@ def run_throttled_server(port: int = PORT, threshold: int = 10**6) -> None:
 
 
 def make_url(name: str, ext: str = "csv") -> str:
+    # The file name depends on the dataset size (see bigfile_rows())
+    stem = os.path.splitext(os.path.basename(get_dataset(name)))[0]
     return "http://{host}:{port}/{name}.{ext}".format(
-        host=HOST, port=PORT, name=name, ext=ext
+        host=HOST, port=PORT, name=stem, ext=ext
     )
 
 
@@ -108,7 +110,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         aio.run(s.start())
         _close(module)
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_02_read_http_csv_crash_recovery(self) -> None:
         p = Process(target=run_throttled_server, args=(PORT, 10**7))
@@ -125,7 +127,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         aio.run(s.start())
         _close(module)
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_03_read_multiple_csv_crash_recovery(self) -> None:
         p = Process(target=run_throttled_server, args=(PORT, 10**6))
@@ -163,7 +165,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         aio.run(s.start())
         _close(module)
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_05_read_http_csv_bz2_crash_recovery(self) -> None:
         p = Process(target=run_throttled_server, args=(PORT, 10**7))
@@ -183,7 +185,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         aio.run(s.start())
         _close(module)
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_06_read_multiple_csv_bz2_crash_recovery(self) -> None:
         p = Process(target=run_throttled_server, args=(PORT, 10**6))

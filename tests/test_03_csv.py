@@ -5,7 +5,7 @@ from . import ProgressiveTest, skipIf
 from progressivis.core import aio
 
 from progressivis import CSVLoader, Constant, PTable, Sink
-from progressivis.datasets import get_dataset
+from progressivis.datasets import get_dataset, bigfile_rows
 from progressivis.core.utils import RandomBytesIO
 
 
@@ -35,7 +35,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 1000000)
+        self.assertEqual(len(module.result), bigfile_rows())
 
     def test_read_fake_csv(self) -> None:
         s = self.scheduler
@@ -103,9 +103,9 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         aio.run(s.start())
         assert module.result is not None
         table = module.result
-        self.assertEqual(len(table), 1000000)
+        self.assertEqual(len(table), bigfile_rows())
         self.assertEqual(table.columns, ["array"])
-        self.assertEqual(table["array"].shape, (1000000, 30))
+        self.assertEqual(table["array"].shape, (bigfile_rows(), 30))
 
     def test_as_array2(self) -> None:
         s = self.scheduler
@@ -124,10 +124,10 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         aio.run(s.start())
         assert module.result is not None
         table = module.result
-        self.assertEqual(len(table), 1000000)
+        self.assertEqual(len(table), bigfile_rows())
         self.assertEqual(table.columns, ["firsthalf", "secondhalf"])
-        self.assertEqual(table["firsthalf"].shape, (1000000, 13))
-        self.assertEqual(table["secondhalf"].shape, (1000000, 17))
+        self.assertEqual(table["firsthalf"].shape, (bigfile_rows(), 13))
+        self.assertEqual(table["secondhalf"].shape, (bigfile_rows(), 17))
 
     @skipIf(os.getenv("CI"), "skipped because mnist file is no longer available")
     def test_as_array3(self) -> None:
