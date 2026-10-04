@@ -33,22 +33,29 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 - [x] `bigfile` size configurable: `progressivis.datasets.bigfile_rows()`,
       env `PROGRESSIVIS_BIGFILE_ROWS`; tests default to 100k rows (`tests/__init__.py`);
       non-default sizes get their own file name (`bigfile_100000.csv`)
-- [ ] Fix the datetime slow path that looks like a hang: `PTable.append` (`table/table.py:397-415`)
-      falls back to a per-row Python loop when a datetime column fails the vectorized copy
-      (`ValueError: could not broadcast (1000,) into (1000,6)`). Hits `test_03_join::test_outer_pu`
-      and `test_03_threaded_csv::test_read_csv_taxis` (taxi data): each > 5 min, 600 s of the 18-min run.
-      Passes in CI, so probably triggered by pandas 3 / pyarrow 25. One `run_step` far exceeds its quantum.
+- [x] Vectorize datetime storage in `PTable.append` (was a per-row loop; identical results, ~10x faster)
+- [x] Vectorize `GroupBy.process_created` (was one `Row` read per row); keeps first-appearance
+      group order, which `Aggregate` relies on. `test_03_join::test_outer_pu`: > 300 s → 2.4 s
+- [x] Stale test expectations: taxi file now 512k rows (groupby reads count from file metadata,
+      expected group count from pandas); `"uniq"` → `"nunique"` in `test_03_aggr`;
+      `cast(pd.Index[Any], …)` breaks at runtime with pandas 3 (quoted) in `test_03_join`
+- [ ] **Real bug:** deletions propagate nondeterministically in `Stirrer → GroupBy → Aggregate`
+      (`test_03_aggr::test_aggregate_1_col_delete`, fails on master too). Sometimes the deleted value is
+      subtracted, sometimes not, depending on step timing. GroupBy updates its selection correctly; the
+      deletion is lost on the way to Aggregate (selected-view change manager?). Repro: run the test 3 times.
+- [ ] Note: 11 test classes are skipped on CI (`skipIf(os.getenv("CI"))`) — that is why CI is green
 - [ ] Offline-safe tests: skip (not fail) when a download is unavailable (PPCA, taxis, `test_as_array3`)
 - [ ] HTTP tests (`test_03_csv_over_http`): local RangeHTTPServer often refused connections here; flaky
 
 ### Known failures on master (macOS, Python 3.14, pandas 3.0.6, pyarrow 25)
 
 - `test_00_storageengine::test_storage_engines` — mmap temp dir unset (order-dependent)
-- `test_03_aggr` (2) — test asks for `"uniq"`, aggregator registered as `"nunique"` (`stats/online.py:113`)
-- `test_03_groupby` (5), `test_03_recoverable_csv` (8) — fail identically on master; not investigated
+- ~~`test_03_aggr` (2)~~ — fixed `"uniq"`; `_delete` is the real bug above
+- ~~`test_03_groupby` (5)~~ — fixed (stale expectations)
+- `test_03_recoverable_csv` (8) — fail identically on master; not investigated yet
 - `test_03_csv_over_http` (3–6) — local HTTP server connection refused
 - `test_03_ppca` (7), `test_03_csv::test_as_array3`, `test_03_threaded_csv::test_read_csv_taxis` — downloads 404 / time out
-- `test_03_join::test_outer_pu` — datetime slow path (above)
+- ~~`test_03_join::test_outer_pu`~~ — fixed (datetime + GroupBy vectorized, pandas 3 cast)
 
 ## Phase 1 — task parallelism ("wave" scheduler)
 

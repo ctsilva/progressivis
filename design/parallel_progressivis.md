@@ -1,6 +1,7 @@
 # Parallel ProgressiVis: bringing PDS-style parallelism to progressive analytics
 
-*Design note — October 2026. Status: proposal, nothing implemented yet.*
+*Design note — October 2026. Status: Phase 0 done (branch `parallel-scheduler`);
+test-suite cleanup in progress; Phase 1 not started. Day-to-day tracking: [`PLAN.md`](../PLAN.md).*
 
 ## 1. Summary
 
@@ -102,6 +103,13 @@ task-parallel speedup.
 | 3.14t (no GIL), current code | 31.9 s | 13.3 s | 2.39x |
 | 3.14 (GIL), PIntSet fix | 10.7 s | 9.3 s | 1.15x |
 | 3.14t (no GIL), PIntSet fix | 8.1 s | 3.2 s | 2.49x |
+| 3.14 (GIL), fix committed, median of 3, busy machine | 14.7 s | 11.6 s | 1.24x |
+| 3.14t (no GIL), fix committed, median of 3, busy machine | 10.1 s | 5.2 s | 1.93x |
+
+The first four rows are single runs on a quiet machine with the fix applied
+as a runtime patch; the last two are medians of three runs with the committed
+fix while other applications kept the machine busy (load average 6–9 on 10
+cores). Absolute times and speedups vary noticeably with machine load.
 
 **Finding 1 — single-threaded bug.** Profiling showed framework bookkeeping is
 negligible; ~70% of time was in two numpy read paths. `table.loc[slice]`
@@ -133,6 +141,48 @@ wheels and build from source (~10 min).
 **Finding 4 — idle time.** Every serial run showed CPU/wall ≈ 0.8: each
 scheduler spends ~20% of its time idle in asyncio waits. Worth investigating
 independently.
+
+**Finding 5 — row-by-row Python loops break the time quantum ("hangs").**
+The full test suite hung for hours. With a per-test timeout and a report of
+the scheduler state at timeout, the cause turned out not to be a deadlock but
+single `run_step` calls lasting minutes:
+
+- `PTable.append` stored datetime columns with a per-row Python loop when the
+  vectorized copy failed (`table/table.py`), which it does with pandas 3 /
+  pyarrow 25.
+- `GroupBy.process_created` read each row's key through `Row` objects, one
+  `PIntSet` per row (`table/group_by.py`).
+
+Both are now vectorized. `test_03_join::test_outer_pu` went from > 300 s
+(timeout) to 2.4 s, results unchanged (and group creation order preserved,
+which `Aggregate` relies on). The lesson matters for the design: **a module
+whose step cost is not proportional to its step size defeats the time
+predictor**, so no quantum (and no parallel scheduler) can keep it bounded.
+Every `run_step` must be vectorized over its chunk.
+
+**Finding 6 — CI is green partly because it skips the hard tests.** 11 test
+classes are skipped when `CI` is set: aggregate, group-by, join, recoverable
+CSV, PPCA, both HTTP-server suites, threaded CSV, KLL, MNIST and a long
+correlation test. Locally (macOS, Python 3.14, pandas 3.0.6, pyarrow 25) the
+suite had 29 failures, all also present on `master`: stale expectations (a
+300k-row taxi file that is now downloaded with 512k rows; an aggregator
+renamed `uniq` → `nunique`; a pandas 3 runtime-typing incompatibility), a dead
+download URL (MNIST on datahub.io), a flaky local HTTP server, and two real
+bugs (Finding 5 and Finding 7). Phase 1 needs a test suite that runs these
+paths, so cleaning it up comes first.
+
+**Finding 7 — deletions propagate nondeterministically.** In
+`Stirrer → GroupBy → Aggregate`, a deleted row is sometimes subtracted from the
+aggregate and sometimes not, depending on how the run is split into steps
+(timing). `GroupBy` removes the row from its output selection correctly; the
+deletion is lost on the way to `Aggregate`. This is a single-threaded bug
+today, and a warning for Phase 1: change propagation must be correct for
+every interleaving before we add more interleavings.
+
+**Test-suite size.** The generated `bigfile` (1M rows × 30 columns, 556 MB plus
+compressed and Parquet copies) is now configurable (`PROGRESSIVIS_BIGFILE_ROWS`,
+100k in tests). That saved ~50 s; the dominant costs of the 18-minute local run
+were the two tests stuck in the per-row loops (600 s) and failing downloads.
 
 ## 6. Why this matters: tens to hundreds of cores
 
@@ -193,13 +243,24 @@ Key consequences:
 
 ## 7. Plan
 
-### Phase 0 — single-threaded fixes and a benchmark (small, do first)
-- Add `PIntSet.__array__`; on the read path, convert contiguous `PIntSet`s to
-  slices (`to_slice_maybe()`) before indexing storage.
-- Run the full test suite; confirm results unchanged.
-- Add the experiment as `scripts/bench_parallel.py` (serial vs threaded,
-  wall and CPU time, GIL status) so later phases are measured the same way.
-- Investigate the ~20% scheduler idle time.
+### Phase 0 — single-threaded fixes and a benchmark — done
+- Done: `PIntSet.__array__`; contiguous `PIntSet`s read as slices.
+- Done: full test suite shows no new failures.
+- Done: `scripts/bench_parallel.py`.
+- Open: investigate the ~20% scheduler idle time.
+
+### Phase 0.5 — bounded steps and a trustworthy test suite (in progress)
+- Done: per-test timeout (`pytest-timeout`, 600 s) and the scheduler state in
+  timeout reports (`tests/conftest.py`), so a hang is a failure with a diagnosis.
+- Done: smaller generated datasets for tests (`PROGRESSIVIS_BIGFILE_ROWS`).
+- Done: vectorize the datetime path of `PTable.append` and `GroupBy` (Finding 5).
+- Done: fix stale test expectations (taxi row counts, `nunique`, pandas 3 typing).
+- To do: fix nondeterministic deletion propagation (Finding 7).
+- To do: replace or skip-when-unavailable the dead MNIST download; make the
+  HTTP-server tests reliable; review the remaining local failures.
+- To do: audit other modules for row-by-row loops in `run_step`.
+- To do: run the CI-skipped tests somewhere (e.g. a scheduled job with cached
+  datasets), so they cannot rot silently.
 
 ### Phase 1 — task parallelism ("wave" scheduler)
 Current single-thread assumptions to address:
@@ -259,7 +320,11 @@ Design:
 - **Single-thread overhead of 3.14t** relative to the standard build must be
   measured on our workloads; the parallel scheduler must stay optional.
 - **Determinism**: concurrent waves change step interleaving; tests that depend
-  on exact step sequences may need tolerance or a deterministic mode.
+  on exact step sequences may need tolerance or a deterministic mode. Finding 7
+  shows interleaving-dependent results already exist single-threaded.
+- **Unbounded steps**: one module with a row-by-row loop stalls the whole
+  dataflow (Finding 5); parallelism hides this only partially. The timeout
+  report should stay in the test suite permanently.
 - **User-written modules** (`doc/custom_modules.md`) may not be thread-safe;
   the opt-out flag and documentation must make this explicit.
 - **Bandwidth-bound workloads** may show modest gains on many-core machines;

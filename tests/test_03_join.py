@@ -313,7 +313,7 @@ class TestProgressiveJoin(ProgressiveTest):
         )
         view_pu = [f"{c}_pu" for c in view]
         outer_pu__ = outer_pu_.sort_values(ord)[view_pu].fillna(0).set_index(df3.index)
-        outer_pu__.columns = cast(pd.Index[Any], view)
+        outer_pu__.columns = cast("pd.Index[Any]", view)
         self.assertTrue(outer_pu__.equals(df3[view]))
 
 

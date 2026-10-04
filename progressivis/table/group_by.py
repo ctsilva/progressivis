@@ -138,28 +138,77 @@ class GroupBy(Module):
     def process_created(self, by: Any, indices: PIntSet) -> None:
         raise NotImplementedError(f"Wrong type for {by}")
 
+    def _add_groups(
+        self, key_columns: List[np.ndarray[Any, Any]], indices: PIntSet, as_tuple: bool
+    ) -> bool:
+        """
+        Group ``indices`` by the values of ``key_columns`` (1-D arrays aligned
+        with ``indices``) and add each group to the index in bulk.
+        Returns False if the keys cannot be sorted, so the caller falls back
+        to the row by row path.
+        """
+        ids = np.asarray(indices)
+        if len(ids) == 0:
+            return True
+        try:
+            uniques, codes = zip(
+                *(np.unique(col, return_inverse=True) for col in key_columns)
+            )
+        except TypeError:  # e.g. mixed, unorderable object values
+            return False
+        if len(codes) == 1:
+            group_of_row = codes[0].reshape(-1)
+            group_codes = np.arange(len(uniques[0])).reshape(-1, 1)
+        else:
+            group_codes, group_of_row = np.unique(
+                np.stack([c.reshape(-1) for c in codes], axis=1),
+                axis=0,
+                return_inverse=True,
+            )
+            group_of_row = group_of_row.reshape(-1)
+        order = np.argsort(group_of_row, kind="stable")
+        bounds = np.flatnonzero(np.diff(group_of_row[order])) + 1
+        groups = np.split(order, bounds)
+        # Create new groups in order of first appearance, like the row by row
+        # path (downstream modules such as Aggregate rely on that order).
+        groups.sort(key=lambda rows: rows[0])
+        for rows in groups:
+            g = group_of_row[rows[0]]
+            key_parts = [u[c] for u, c in zip(uniques, group_codes[g])]
+            key = tuple(key_parts) if as_tuple else key_parts[0]
+            self._index[key].update(PIntSet(ids[rows]))
+        return True
+
+    def _column_values(self, col: str, indices: PIntSet) -> np.ndarray[Any, Any]:
+        assert self._input_table is not None
+        return np.asarray(self._input_table[col].loc[indices])
+
     @process_created.register
     def _(self, by: str, indices: PIntSet) -> None:
         assert self._input_table is not None
+        if self._add_groups([self._column_values(by, indices)], indices, False):
+            return
         for i in indices:
             key = self._input_table.loc[i, by]
             self._index[key].add(i)
 
-    @process_created.register  # TODO: unify with tuple variant below (i.e. by: list|tuple)when abandon py3.10
-    def _(self, by: list, indices: PIntSet) -> None:  # type: ignore
+    def _process_columns(self, by: Sequence[str], indices: PIntSet) -> None:
         assert self._input_table is not None
+        values = [self._column_values(col, indices) for col in by]
+        if self._add_groups(values, indices, True):
+            return
         columns = [self._input_table[col] for col in by]
         for i in indices:
             gen = [col.loc[i] for col in columns]
             self._index[tuple(gen)].add(i)
 
+    @process_created.register  # TODO: unify with tuple variant below (i.e. by: list|tuple)when abandon py3.10
+    def _(self, by: list, indices: PIntSet) -> None:  # type: ignore
+        self._process_columns(by, indices)
+
     @process_created.register
     def _(self, by: tuple, indices: PIntSet) -> None:  # type: ignore
-        assert self._input_table is not None
-        columns = [self._input_table[col] for col in by]
-        for i in indices:
-            gen = [col.loc[i] for col in columns]
-            self._index[tuple(gen)].add(i)
+        self._process_columns(by, indices)
 
     @process_created.register
     def _(self, by: types.FunctionType, indices: PIntSet) -> None:
@@ -171,16 +220,17 @@ class GroupBy(Module):
         assert self._input_table is not None
         col = by.column
         val = by.selection
+        dt = self._column_values(col, indices)
         if self._keepdims:
             mask_ = np.zeros(6, dtype=int)
             mask_[val] = 1
-            for i in indices:
-                dt_vect = self._input_table.loc[i, col]
-                self._index[tuple(dt_vect * mask_)].add(i)
+            keys = dt * mask_
         else:
-            for i in indices:
-                dt_vect = self._input_table.loc[i, col]
-                self._index[tuple(dt_vect[val])].add(i)
+            keys = dt[:, val]
+        if self._add_groups(list(keys.T), indices, True):
+            return
+        for i, k in zip(indices, keys):
+            self._index[tuple(k)].add(i)
 
     def process_deleted(self, indices: PIntSet) -> None:
         for k in self._index.keys():

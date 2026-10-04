@@ -60,6 +60,16 @@ def _get_slice_arr(arr: Data, sl: Index) -> Data:
     return arr[sl]
 
 
+def _datetime_to_ymdhms(values: Any) -> np.ndarray[Any, Any]:
+    "Convert datetimes to an (n, 6) array of year, month, day, hour, minute, second"
+    if not isinstance(values, pd.Series) and hasattr(values, "to_pandas"):
+        values = values.to_pandas()  # pyarrow: keeps the timezone, like as_py()
+    idx = pd.DatetimeIndex(values)
+    return np.stack(
+        [idx.year, idx.month, idx.day, idx.hour, idx.minute, idx.second], axis=1
+    )
+
+
 class PTable(IndexPTable):
     """Create a PTable data structure, made of a collection of columns.
 
@@ -385,7 +395,6 @@ class PTable(IndexPTable):
             self.loc[left_ind, :] = data
         elif all_arrays:
             from_ind = slice(0, length)
-            raw_indices = indices  # still PIntSet here
             # indices = indices_to_slice(indices)
             indices = indices.to_slice_maybe()
             for colname in self:
@@ -396,30 +405,14 @@ class PTable(IndexPTable):
                 try:
                     tocol[indices] = fromcol_ind
                 except ValueError:
-                    if isinstance(fromcol, pa.TimestampArray):
-                        for i, (k, elt) in enumerate(zip(raw_indices, fromcol_ind)):
-                            dt = elt.as_py()
-                            tocol[k] = (
-                                dt.year,
-                                dt.month,
-                                dt.day,
-                                dt.hour,
-                                dt.minute,
-                                dt.second,
-                            )
-                    elif isinstance(
-                        fromcol, pd.Series
-                    ) and fromcol.dtype.name.startswith("datetime"):
-                        for i, (k, dt) in enumerate(zip(raw_indices, fromcol_ind)):
-                            tocol[k] = (
-                                dt.year,
-                                dt.month,
-                                dt.day,
-                                dt.hour,
-                                dt.minute,
-                                dt.second,
-                            )
-
+                    if isinstance(fromcol, pa.TimestampArray) or (
+                        isinstance(fromcol, pd.Series)
+                        and fromcol.dtype.name.startswith("datetime")
+                    ):
+                        # Datetime columns are stored as (year, month, day,
+                        # hour, minute, second); convert the whole chunk at
+                        # once instead of row by row.
+                        tocol[indices] = _datetime_to_ymdhms(fromcol_ind)
                     else:
                         raise
         else:

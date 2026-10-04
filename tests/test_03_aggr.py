@@ -54,7 +54,7 @@ class TestProgressiveAggregate(ProgressiveTest):
         grby = GroupBy(by="passenger_count", scheduler=s)
         grby.input.table = parquet.output.result
         # aggr = Aggregate(compute=[("trip_distance", "mean")], scheduler=s)
-        aggr = Aggregate(compute=[("RateCodeID", "uniq")], scheduler=s)
+        aggr = Aggregate(compute=[("RateCodeID", "nunique")], scheduler=s)
         aggr.input.table = grby.output.result
         sink = Sink(scheduler=s)
         sink.input.inp = aggr.output.result
@@ -69,7 +69,7 @@ class TestProgressiveAggregate(ProgressiveTest):
         )
         self.assertTrue(
             np.array_equal(
-                aggr.result["RateCodeID_uniq"].value,
+                aggr.result["RateCodeID_nunique"].value,
                 TABLE_AGGR["RateCodeID_count_distinct"].to_numpy()
             ),
             "RateCodeID_count_distinct is not equal"

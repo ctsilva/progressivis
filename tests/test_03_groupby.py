@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from . import ProgressiveTest, skipIf
+import pandas as pd
+import pyarrow.parquet as pq
 from progressivis import Sink, ParquetLoader, PTable, get_dataset
 from progressivis.table.group_by import GroupBy, SubPColumn as SC
 from progressivis.core import aio
@@ -11,6 +13,7 @@ PASSENGERS = {0, 1, 2, 3, 4, 5, 6, 9}
 
 # PARQUET_FILE = "nyc-taxi/short_500k_yellow_tripdata_2015-01.parquet"
 PARQUET_FILE = get_dataset("short-taxis2015-01_parquet")
+PARQUET_ROWS = pq.ParquetFile(PARQUET_FILE).metadata.num_rows
 
 # NB: if PARQUET_FILE does not exist yet, consider running:
 # python scripts/create_nyc_parquet.py -p short -t yellow -f -m1 -n 300000
@@ -32,7 +35,7 @@ class TestProgressiveGroupBy(ProgressiveTest):
         sink.input.inp = grby.output.result
         aio.run(s.start())
         assert parquet.result is not None
-        self.assertEqual(len(parquet.result), 300_000)
+        self.assertEqual(len(parquet.result), PARQUET_ROWS)
         self.assertEqual(set(grby.index.keys()), PASSENGERS)
 
     def test_group_by_2_cols(self) -> None:
@@ -49,8 +52,10 @@ class TestProgressiveGroupBy(ProgressiveTest):
         sink.input.inp = grby.output.result
         aio.run(s.start())
         assert parquet.result is not None
-        self.assertEqual(len(parquet.result), 300_000)
-        self.assertEqual(len(grby.index.keys()), 36)
+        self.assertEqual(len(parquet.result), PARQUET_ROWS)
+        expected = pd.read_parquet(PARQUET_FILE, columns=["passenger_count", "extra"])
+        n_groups = expected.groupby(["passenger_count", "extra"]).ngroups
+        self.assertEqual(len(grby.index.keys()), n_groups)
 
     def test_group_by_function(self) -> None:
         s = self.scheduler
@@ -66,7 +71,7 @@ class TestProgressiveGroupBy(ProgressiveTest):
         sink.input.inp = grby.output.result
         aio.run(s.start())
         assert parquet.result is not None
-        self.assertEqual(len(parquet.result), 300_000)
+        self.assertEqual(len(parquet.result), PARQUET_ROWS)
         self.assertEqual(len(grby.index.keys()), 10)
 
     def test_group_by_days(self) -> None:
@@ -93,7 +98,7 @@ class TestProgressiveGroupBy(ProgressiveTest):
         sink.input.inp = grby.output.result
         aio.run(s.start())
         assert parquet.result is not None
-        self.assertEqual(len(parquet.result), 300_000)
+        self.assertEqual(len(parquet.result), PARQUET_ROWS)
         self.assertEqual(
             len(grby.index.keys()), 31
         )
@@ -117,7 +122,7 @@ class TestProgressiveGroupBy(ProgressiveTest):
         sink.input.inp = grby.output.result
         aio.run(s.start())
         assert parquet.result is not None
-        self.assertEqual(len(parquet.result), 300_000)
+        self.assertEqual(len(parquet.result), PARQUET_ROWS)
         self.assertEqual(
             len(grby.index.keys()), 31
         )
