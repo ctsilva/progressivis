@@ -129,6 +129,15 @@ class PIntSet(Iterable[int]):
     def __len__(self) -> int:
         return len(self.bm)
 
+    def __array__(
+        self, dtype: Any = None, copy: Optional[bool] = None
+    ) -> np.ndarray[Any, Any]:
+        # Without this, numpy iterates the PIntSet one Python int at a time
+        # (~90x slower and holding the GIL) when it is used as an index.
+        if copy is False:
+            raise ValueError("A PIntSet cannot be converted to an array without copy")
+        return np.asarray(self.bm.to_array(), dtype=dtype or np.int64)
+
     def min(self) -> int:
         return self.bm.min()
 

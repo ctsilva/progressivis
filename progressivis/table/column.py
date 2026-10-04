@@ -285,6 +285,13 @@ class PColumn(BasePColumn):
         assert self.dataset is not None
         if isinstance(index, np.ndarray):
             index = list(index)
+        elif isinstance(index, PIntSet):
+            sl = index.to_slice_maybe()
+            if isinstance(sl, slice):
+                # Contiguous rows: read a slice instead of gathering element by
+                # element. Copy to keep the semantics of fancy indexing.
+                res = self.dataset[sl]
+                return res.copy() if isinstance(res, np.ndarray) else res
         try:  # EAFP
             return self.dataset[index]
         except TypeError:
@@ -304,6 +311,9 @@ class PColumn(BasePColumn):
                 source_sel = list(source_sel)
             #            if is_fancy(source_sel):
             #                source_sel = fancy_to_mask(source_sel, self.shape)
+            if isinstance(source_sel, PIntSet):
+                self.dataset.read_direct(array, source_sel.to_slice_maybe(), dest_sel)  # type: ignore
+                return
             self.dataset.read_direct(array, source_sel, dest_sel)
         else:
             super().read_direct(array, source_sel, dest_sel)
