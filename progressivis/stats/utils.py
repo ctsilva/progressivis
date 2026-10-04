@@ -102,16 +102,19 @@ class SimpleImputer:
             add_strategy(col, df[cast(str, col)], dt)
 
     def add_mean(self, col: str, val: Any, dt: np.dtype[Any]) -> None:
-        self._means[col].update(val)
+        # val is a whole column chunk, not a single value
+        self._means[col].update_many(np.asarray(val))
 
     def add_median(self, col: str, val: Any, dt: np.dtype[Any]) -> None:
         sk: Union[kll_ints_sketch, kll_floats_sketch]
+        # datasketches only accepts numpy arrays of its own element type
         if np.issubdtype(dt, np.integer):
             sk = kll_ints_sketch(self._k)
+            sk.update(np.ascontiguousarray(val, dtype=np.int32))  # type: ignore
         else:
             assert np.issubdtype(dt, np.floating)
             sk = kll_floats_sketch(self._k)
-        sk.update(val)
+            sk.update(np.ascontiguousarray(val, dtype=np.float32))
         self._medians[col].merge(sk)  # type: ignore
 
     def add_most_frequent(self, col: str, val: Any, dt: np.dtype[Any]) -> None:

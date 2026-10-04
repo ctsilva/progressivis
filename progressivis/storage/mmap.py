@@ -57,16 +57,15 @@ def cleanup_temp_dir() -> None:
     tmp = temp_dir()
     if tmp is None:
         return
-    if StorageEngine._default == "mmap":
-        root = StorageEngine.engines()["mmap"]
-        assert isinstance(root, MMapGroup)
+    root = StorageEngine.engines().get("mmap")
+    if isinstance(root, MMapGroup):
         for tbl in root.dict.values():
             if isinstance(tbl, MMapGroup) and tbl.has_files():
                 tbl.close_all()
                 tbl.delete_children()
         root.dict = {}
-        shutil.rmtree(str(tmp))
-        VARS["TEMP_DIR"] = None
+    shutil.rmtree(str(tmp), ignore_errors=True)
+    VARS["TEMP_DIR"] = None
 
 
 @atexit.register
@@ -411,6 +410,10 @@ class MMapGroup(GroupImpl):
         "Return the path of the directory for that group"
         if self.parent is None:
             init_temp_dir_if()
+            if temp_dir() is None:
+                # Not the default (persistent) engine, but used explicitly:
+                # still needs a directory, never the literal "None".
+                VARS["TEMP_DIR"] = mkdtemp(prefix=TEMP_DIR_PREFIX)
             VARS["REMOVE_TEMP_DIR_AT_EXIT"] = True
             return os.path.join(str(temp_dir()), self._name)
         parent = cast(MMapGroup, self.parent)

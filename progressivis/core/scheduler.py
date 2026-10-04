@@ -608,7 +608,15 @@ class Scheduler:
         if self.all_blocked():
             # no module ready
             has_run = await self._idle_procs.fire(self, self._run_number)
-            if not has_run:
+            if (
+                not has_run
+                and self.no_more_data()
+                and not self.is_waiting_for_input()
+            ):
+                # Nothing outside the dataflow can unblock it: the next sweep
+                # terminates the blocked modules, no need to wait.
+                pass
+            elif not has_run:
                 logger.info("sleeping %f", 0.2)
                 # print("Sleeping 0.2")
                 await aio.sleep(0.2)

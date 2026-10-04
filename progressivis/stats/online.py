@@ -98,6 +98,7 @@ class Count(Univariate):  # Keep this functor first!
         self.n = 0
 
     def update_many(self, col: Column) -> None:
+        col = np.asarray(col)  # column views report len() as their id range
         self.n += len(col)
 
     def get(self) -> float:
@@ -150,7 +151,8 @@ class Mean(Univariate):
         self.n += 1
 
     def update_many(self, col: Column) -> None:
-        self.sum += np.sum(col)  # type: ignore
+        col = np.asarray(col)  # column views report len() as their id range
+        self.sum += np.sum(col)
         self.n += len(col)
 
     @property
@@ -196,6 +198,7 @@ class Var(Univariate):
         return self.__class__(self.ddof)
 
     def update_many(self, col: Column) -> None:
+        col = np.asarray(col)  # column views report len() as their id range
         old = self.mean.get()
         self.mean.update_many(col)
         new = self.mean.get()
@@ -267,6 +270,7 @@ class Cov(Bivariate):
         return self.__class__(self.ddof)
 
     def update_many(self, col_x: Column, col_y: Column) -> None:
+        col_x, col_y = np.asarray(col_x), np.asarray(col_y)  # see Mean.update_many
         dx = np.subtract(col_x, self.mean_x.get())  # type: ignore
         self.mean_x.update_many(col_x)
         self.mean_y.update_many(col_y)
