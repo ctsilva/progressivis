@@ -1,24 +1,21 @@
-from . import ProgressiveTest, skipIf
+from . import ProgressiveTest, skipIf, LocalHTTPServer, free_port
 
-from multiprocessing import Process
 import time
 import os
 
 from RangeHTTPServer import RangeRequestHandler  # type: ignore
 
-import http.server as http_srv
 
 from progressivis.core import aio
 
 from progressivis import CSVLoader, Sink, Constant, PTable
-from progressivis.datasets import get_dataset, get_dataset_bz2, DATA_DIR, bigfile_rows
+from progressivis.datasets import get_dataset, get_dataset_bz2, bigfile_rows
 
 from typing import Any, Optional
 
 
 BZ2 = "csv.bz2"
-SLEEP = 1
-PORT: int = 9090
+PORT: int = free_port()
 HOST: str = "localhost"
 
 
@@ -52,14 +49,19 @@ def _close(module: CSVLoader) -> None:
         pass
 
 
-def run_throttled_server(port: int = PORT, threshold: int = 10**6) -> None:
+def start_server(threshold: Optional[int] = None) -> LocalHTTPServer:
+    "Serve the datasets, throttled (pausing after `threshold` bytes) if given"
     _ = get_dataset("smallfile")
     _ = get_dataset("bigfile")
     _ = get_dataset_bz2("smallfile")
     _ = get_dataset_bz2("bigfile")
-    os.chdir(DATA_DIR)
-    ThrottledReqHandler.threshold = threshold
-    http_srv.test(HandlerClass=ThrottledReqHandler, port=port)  # type: ignore
+    if threshold is None:
+        server = LocalHTTPServer(PORT)
+    else:
+        ThrottledReqHandler.threshold = threshold
+        server = LocalHTTPServer(PORT, ThrottledReqHandler)
+    server.start()
+    return server
 
 
 def make_url(name: str, ext: str = "csv") -> str:
@@ -70,36 +72,18 @@ def make_url(name: str, ext: str = "csv") -> str:
     )
 
 
-def run_simple_server() -> None:
-    _ = get_dataset("smallfile")
-    _ = get_dataset("bigfile")
-    _ = get_dataset_bz2("smallfile")
-    _ = get_dataset_bz2("bigfile")
-    os.chdir(DATA_DIR)
-    import RangeHTTPServer.__main__  # type: ignore
-
-    RangeHTTPServer.__main__
-
-
 @skipIf(os.getenv("CI"), "cannot run an HTTP local server anymore on CI ...")
 class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
     def setUp(self) -> None:
         super(TestProgressiveLoadCSVOverHTTP, self).setUp()
-        self._http_proc: Optional[Process] = None
+        self._http_proc: Optional[LocalHTTPServer] = None
 
     def tearDown(self) -> None:
         if self._http_proc is not None:
-            try:
-                self._http_proc.terminate()
-                time.sleep(SLEEP)
-            except Exception:
-                pass
+            self._http_proc.stop()
 
     def test_01_read_http_csv_no_crash(self) -> None:
-        p = Process(target=run_simple_server, args=())
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server()
         s = self.scheduler
         module = CSVLoader(
             make_url("bigfile"), header=None, scheduler=s
@@ -113,10 +97,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         self.assertEqual(len(module.result), bigfile_rows())
 
     def test_02_read_http_csv_crash_recovery(self) -> None:
-        p = Process(target=run_throttled_server, args=(PORT, 10**7))
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server(threshold=10**7)
         s = self.scheduler
         module = CSVLoader(
             make_url("bigfile"), header=None, scheduler=s, timeout=0.01
@@ -130,10 +111,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         self.assertEqual(len(module.result), bigfile_rows())
 
     def test_03_read_multiple_csv_crash_recovery(self) -> None:
-        p = Process(target=run_throttled_server, args=(PORT, 10**6))
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server(threshold=10**6)
         s = self.scheduler
         filenames = PTable(
             name="file_names",
@@ -151,10 +129,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         self.assertEqual(len(csv.result), 60000)
 
     def test_04_read_http_csv_bz2_no_crash(self) -> None:
-        p = Process(target=run_simple_server, args=())
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server()
         s = self.scheduler
         module = CSVLoader(
             make_url("bigfile", ext=BZ2), header=None, scheduler=s
@@ -168,10 +143,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         self.assertEqual(len(module.result), bigfile_rows())
 
     def test_05_read_http_csv_bz2_crash_recovery(self) -> None:
-        p = Process(target=run_throttled_server, args=(PORT, 10**7))
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server(threshold=10**7)
         s = self.scheduler
         module = CSVLoader(
             make_url("bigfile", ext=BZ2),
@@ -188,10 +160,7 @@ class TestProgressiveLoadCSVOverHTTP(ProgressiveTest):
         self.assertEqual(len(module.result), bigfile_rows())
 
     def test_06_read_multiple_csv_bz2_crash_recovery(self) -> None:
-        p = Process(target=run_throttled_server, args=(PORT, 10**6))
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._http_proc = start_server(threshold=10**6)
         s = self.scheduler
         filenames = PTable(
             name="file_names",

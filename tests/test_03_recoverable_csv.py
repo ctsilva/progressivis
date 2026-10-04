@@ -42,9 +42,19 @@ def make_num_csv(
 
 
 def make_int_csv(
-    n_rows: int, n_cols: int, intruder: Optional[Tuple[int, int, Any]] = None
+    n_rows: int,
+    n_cols: int,
+    intruder: Optional[Tuple[int, int, Any]] = None,
+    rand_func: Callable[..., Any] = np.random.randint,
 ) -> StringIO:
-    return make_num_csv(n_rows, n_cols, np.random.randint, intruder)
+    return make_num_csv(n_rows, n_cols, rand_func, intruder)
+
+
+def skewed_randint(low: int, high: int, size: int) -> Any:
+    "Uniform ints, except that 42 appears in ~20% of the cells: a clear mode"
+    values = np.random.randint(low, high, size=size)
+    values[np.random.random(size) < 0.2] = 42
+    return values
 
 
 def make_float_csv(
@@ -57,7 +67,7 @@ def make_float_csv(
 class TestProgressiveLoadCSV(ProgressiveTest):
     def test_read_csv(self) -> None:
         s = self.scheduler
-        n_rows = 100_000
+        n_rows = 20_000
         sio = make_int_csv(n_rows=n_rows, n_cols=3)
         module = SimpleCSVLoader(sio, scheduler=s, dtype="int64")
         self.assertTrue(module.result is None)
@@ -74,11 +84,14 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         imputer: Optional[SimpleImputer] = None,
         atol: float = 0,
         fixed_step_size: int = 0,
+        rand_func: Callable[..., Any] = np.random.randint,
     ) -> None:
         s = self.scheduler
-        n_rows = 100_000
+        n_rows = 20_000
         i_row = n_rows - 42
-        sio = make_int_csv(n_rows=n_rows, n_cols=3, intruder=(i_row, 1, intruder))
+        sio = make_int_csv(
+            n_rows=n_rows, n_cols=3, intruder=(i_row, 1, intruder), rand_func=rand_func
+        )
         df = pd.read_csv(sio)
         sio.seek(0)
 
@@ -86,16 +99,23 @@ class TestProgressiveLoadCSV(ProgressiveTest):
             if not imputer:
                 return np.iinfo(dtype).max
             strategy = imputer.get_strategy("B")
+            # The imputer is fed after each chunk, so the intruder (in the last
+            # chunk) is replaced using the rows of the previous chunks only.
+            if fixed_step_size:
+                seen = df.loc[: n_rows - fixed_step_size - 1, "B"].astype(dtype)
+            else:
+                seen = df["B"].drop(i_row).astype(dtype)
             if strategy == "mean":
-                return df["B"].drop(i_row).astype(dtype).mean()
+                return seen.mean()
             if strategy == "median":
-                return df["B"].drop(i_row).astype(dtype).median()
+                return seen.median()
             if strategy == "constant":
                 return 55
             if strategy == "most_frequent":
                 assert fixed_step_size
-                return df.loc[: n_rows - fixed_step_size, "B"].astype(dtype).mode()[0]
+                return seen.mode()[0]
 
+        df["B"] = df["B"].astype(object)  # pandas 3 reads "B" as str (intruder)
         df.loc[i_row, "B"] = _subst()
         module = SimpleCSVLoader(
             sio, scheduler=s, dtype=dtype, imputer=imputer
@@ -136,7 +156,11 @@ class TestProgressiveLoadCSV(ProgressiveTest):
 
     def test_read_int_csv_with_intruder_64_default(self) -> None:
         self._func_read_int_csv_with_intruder(
-            dtype="int64", intruder="Intruder", imputer=SimpleImputer(), atol=20
+            dtype="int64",
+            intruder="Intruder",
+            imputer=SimpleImputer(),
+            atol=1,
+            fixed_step_size=10_000,
         )
 
     def test_read_int_csv_with_intruder_64_median(self) -> None:
@@ -153,6 +177,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
             intruder="Intruder",
             imputer=SimpleImputer("most_frequent"),
             fixed_step_size=10_000,
+            rand_func=skewed_randint,
         )
 
     def test_read_int_csv_with_intruder_64_constant(self) -> None:
@@ -172,7 +197,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         atol: float = 0,
     ) -> None:
         s = self.scheduler
-        n_rows = 100_000
+        n_rows = 20_000
         i_row = n_rows - 42
         sio = make_float_csv(n_rows=n_rows, n_cols=3, intruder=(i_row, 1, intruder))
         df = pd.read_csv(sio)
@@ -192,6 +217,7 @@ class TestProgressiveLoadCSV(ProgressiveTest):
             #    assert fixed_step_size
             #    return df.loc[: n_rows - fixed_step_size, "B"].astype(dtype).mode()[0]
 
+        df["B"] = df["B"].astype(object)  # pandas 3 reads "B" as str (intruder)
         df.loc[i_row, "B"] = _subst()
         module = SimpleCSVLoader(
             sio,

@@ -1,11 +1,9 @@
-from multiprocessing import Process
-import time
 import os
 
 import numpy as np
 import pandas as pd
 
-from . import ProgressiveTest, skip, skipIf
+from . import ProgressiveTest, skip, skipIf, LocalHTTPServer, free_port
 from progressivis import CSVLoader, Sink, Scheduler
 from progressivis.datasets import (
     get_dataset,
@@ -13,7 +11,6 @@ from progressivis.datasets import (
     get_dataset_bz2,
     get_dataset_gz,
     get_dataset_lzma,
-    DATA_DIR,
 )
 from progressivis.stats.counter import Counter
 from progressivis.storage import IS_PERSISTENT
@@ -26,9 +23,8 @@ BZ2 = "csv.bz2"
 GZ = "csv.gz"
 XZ = "csv.xz"
 
-PORT = 9090
+PORT = free_port()
 HOST = "localhost"
-SLEEP = 10
 
 # IS_PERSISTENT = False
 
@@ -68,17 +64,14 @@ def make_url(name: str, ext: str = "csv") -> str:
     )
 
 
-def run_simple_server() -> None:
+def prepare_datasets() -> None:
+    "Generate the files served over HTTP before the server starts"
     _ = get_dataset("smallfile")
     _ = get_dataset("bigfile")
     _ = get_dataset_bz2("smallfile")
     _ = get_dataset_bz2("bigfile")
     _ = get_dataset_gz("smallfile")
     _ = get_dataset_gz("bigfile")
-    os.chdir(DATA_DIR)
-    import RangeHTTPServer.__main__  # type: ignore
-
-    assert RangeHTTPServer.__main__
 
 
 BIGFILE_DF = pd.read_csv(filepath_or_buffer=get_dataset("bigfile"), header=None, usecols=[0])
@@ -86,25 +79,18 @@ BIGFILE_DF = pd.read_csv(filepath_or_buffer=get_dataset("bigfile"), header=None,
 
 class _HttpSrv:
     def __init__(self) -> None:
-        _HttpSrv.start(self)
+        prepare_datasets()
+        self._server = LocalHTTPServer(PORT)
+        self._server.start()
 
     def stop(self) -> None:
-        if self._http_proc is not None:
-            try:
-                self._http_proc.terminate()
-                time.sleep(SLEEP)
-            except Exception:
-                pass
+        self._server.stop()
 
     def start(self) -> None:
-        p = Process(target=run_simple_server, args=())
-        p.start()
-        self._http_proc = p
-        time.sleep(SLEEP)
+        self._server.start()
 
     def restart(self) -> None:
-        self.stop()
-        self.start()
+        self._server.restart()
 
 
 # IS_PERSISTENT = False

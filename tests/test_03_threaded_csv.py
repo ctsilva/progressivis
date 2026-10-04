@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from . import ProgressiveTest, skipIf
+from . import ProgressiveTest, skipIf, taxi_csv_sample
 from progressivis import Sink, ThreadedCSVLoader, get_dataset
 from progressivis.datasets import bigfile_rows
 from progressivis.core import aio
 import os
 import sys
 
-TAXI_FILE = "https://www.aviz.fr/nyc-taxi/yellow_tripdata_2015-01.csv.bz2"
+TAXI_ROWS = int(os.environ.get("PROGRESSIVIS_TAXI_ROWS", "50000"))
 
 
 @skipIf(os.getenv("CI") or sys.version_info < (3, 13),
@@ -49,14 +49,14 @@ class TestProgressiveLoadCSV(ProgressiveTest):
     def test_read_csv_taxis(self) -> None:
         s = self.scheduler
         module = ThreadedCSVLoader(
-            TAXI_FILE, header=None, scheduler=s
+            taxi_csv_sample(), header=None, scheduler=s
         )
         self.assertTrue(module.result is None)
         sink = Sink(scheduler=s)
         sink.input.inp = module.output.result
         aio.run(s.start())
         assert module.result is not None
-        self.assertEqual(len(module.result), 12748987)
+        self.assertEqual(len(module.result), TAXI_ROWS + 1)  # + header line
 
 
 if __name__ == "__main__":

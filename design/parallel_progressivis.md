@@ -138,9 +138,12 @@ declare free-threading support. Runs above used `PYTHON_GIL=0`, safe there
 because KLL was not used. Also, `datasketches` and `duckdb` have no 3.14t
 wheels and build from source (~10 min).
 
-**Finding 4 — idle time.** Every serial run showed CPU/wall ≈ 0.8: each
-scheduler spends ~20% of its time idle in asyncio waits. Worth investigating
-independently.
+**Finding 4 — idle time (fixed).** Every serial run showed CPU/wall ≈ 0.8.
+Cause: when all modules were blocked at the end of a sweep, the scheduler
+slept 0.2 s, even when nothing outside the dataflow (no input module, no data
+source) could unblock it, i.e. just before terminating. It now skips the sleep
+in that case. Small dataflows were dominated by it: a `linalg` test went from
+0.28 s to 0.04 s, and 230 scheduler/linalg tests from ~90 s to 17 s.
 
 **Finding 5 — row-by-row Python loops break the time quantum ("hangs").**
 The full test suite hung for hours. With a per-test timeout and a report of
@@ -178,6 +181,20 @@ aggregate and sometimes not, depending on how the run is split into steps
 deletion is lost on the way to `Aggregate`. This is a single-threaded bug
 today, and a warning for Phase 1: change propagation must be correct for
 every interleaving before we add more interleavings.
+
+**Finding 8 — the `Var` module returned wrong variances.** On uniform data it
+reported 0.074 instead of 0.083 after 20k rows. Column views report `len()`
+as the size of their id range, not the number of selected rows, so the online
+statistics (`Mean`, `Var`, `Count`, `Cov` in `stats/online.py`) over-counted.
+No existing test compared `Var` with numpy; the new prefix-consistency test
+(§8) caught it at the second step. Inputs are now converted to arrays; the
+`len()` semantics of column views remains a trap to review.
+
+**Other bugs fixed while cleaning the tests.** The CSV imputer passed whole
+pandas Series where scalars or typed arrays were expected (mean, median
+strategies); a non-persistent mmap storage engine created its files under a
+directory literally named `None`; the HTTP test server never started under
+pytest (it parsed pytest's command line and listened on another port).
 
 **Test-suite size.** The generated `bigfile` (1M rows × 30 columns, 556 MB plus
 compressed and Parquet copies) is now configurable (`PROGRESSIVIS_BIGFILE_ROWS`,
@@ -255,9 +272,13 @@ Key consequences:
 - Done: smaller generated datasets for tests (`PROGRESSIVIS_BIGFILE_ROWS`).
 - Done: vectorize the datetime path of `PTable.append` and `GroupBy` (Finding 5).
 - Done: fix stale test expectations (taxi row counts, `nunique`, pandas 3 typing).
-- To do: fix nondeterministic deletion propagation (Finding 7).
-- To do: replace or skip-when-unavailable the dead MNIST download; make the
-  HTTP-server tests reliable; review the remaining local failures.
+- Done: offline, smaller test data (generated digits instead of MNIST; 50k-row
+  taxi slices; local taxi CSV); reliable in-process HTTP test server; fixes
+  listed in Findings 4 and 8.
+- Done: prefix-consistency and interleaving tests
+  (`tests/test_04_progressive_guarantees.py`).
+- To do: fix nondeterministic deletion propagation (Finding 7); the test is
+  marked as an expected failure until then.
 - To do: audit other modules for row-by-row loops in `run_step`.
 - To do: run the CI-skipped tests somewhere (e.g. a scheduled job with cached
   datasets), so they cannot rot silently.
@@ -313,7 +334,57 @@ Design:
   runtime from measured timings.
 - Native core (Rust/PyO3) for change management only if profiling justifies it.
 
-## 8. Risks and open questions
+## 8. Guarantees: what ProgressiVis promises, and what we should check
+
+The ProgressiVis paper (Fekete & Poli, TVCG) describes the mechanisms but
+states no formal guarantees. Reading it together with the code and our test
+results:
+
+**Latency is engineered, not guaranteed.** Each module receives a quantum
+(0.5 s, 0.1 s in interactive mode) and a time predictor converts it into a
+number of items, assuming cost linear in the items processed. Nothing preempts
+a module that overruns; the quantum holds only if the predictor is right.
+Finding 5 shows two modules where it was not (minutes per step). A sweep of the
+scheduler costs the *sum* of the quanta of the modules that run, so latency
+grows with the number of modules (the paper acknowledges this).
+
+**Intermediate results have prefix semantics, at best.** For exact incremental
+operators (min, max, sum, mean, variance, moments, histograms), the output
+after a step should equal the batch result on the rows consumed so far (a
+*prefix* of the input in arrival order), and the final output should equal the
+batch result. Neither property is stated or tested, and Finding 7 shows the
+delta machinery does not always deliver it when rows are deleted.
+
+**Early pictures are not samples unless the input is shuffled.** The prefix
+is in file order. The NYC taxi files are ordered by time, so the early heatmap
+shows the first days of the month, not a random fraction of it. Statistical
+statements (Hoeffding bounds on histogram bin frequencies, DKW bounds on
+quantiles, 1/√n confidence intervals on means) apply only to random-order
+input; the paper's quality indicators are deliberately not confidence
+intervals ("quality should increase until it plateaus; the converse is not
+always true").
+
+**No consistency across modules.** Modules lag each other (the paper's
+"Synchronization" discussion: values normalized with a min/max that has not
+caught up can fall outside [0, 1]). A displayed result may combine inputs at
+different progress points.
+
+**What we propose to check, and later to guarantee:**
+
+1. *Bounded steps*: every test runs under a timeout, and the scheduler state
+   is reported on overrun (done). Next: flag any `run_step` that exceeds a
+   multiple of its quantum, so overruns are visible even when tests pass.
+2. *Prefix consistency*: for exact operators, after every step, the output
+   equals the batch result on the rows consumed so far; checked under random
+   step sizes, with creations, updates and deletions.
+3. *Eventual exactness*: at termination, the output equals the batch result
+   (most existing tests check only this).
+4. *Interleaving independence*: the final result does not depend on how the
+   run is split into steps; essential before Phase 1 adds more interleavings.
+5. *Statistical meaning* (later): optional shuffled ingestion, and confidence
+   bounds for modules where they exist.
+
+## 9. Risks and open questions
 
 - **Free-threaded ecosystem maturity**: every native dependency must declare
   free-threading support or the GIL silently returns (datasketches today).
@@ -341,5 +412,7 @@ Design:
 - H. T. Vo, D. K. Osmari, J. Comba, P. Lindstrom, C. T. Silva. *HyperFlow: A
   Heterogeneous Dataflow Architecture.* Eurographics Symposium on Parallel
   Graphics and Visualization, 2012.
+- J.-D. Fekete, C. Poli. *ProgressiVis: A Language and Environment for Progressive
+  Data Analysis and Visualization.* IEEE TVCG (author version, HAL).
 - J.-D. Fekete et al. *Progressive Data Analysis* (book).
   https://www.aviz.fr/Progressive/PDABook

@@ -103,3 +103,30 @@ def generate_multiscale_random_csv(
         os.remove(filename)
         raise
     return filename
+
+
+def generate_digits_csv(filename: str, rows: int = 20_000, seed: int = 1234) -> str:
+    """
+    A small, labeled, image-like dataset that needs no download: jittered
+    copies of scikit-learn's 8x8 digits (1797 images, 10 classes).
+    Columns: pixel0..pixel63 (ints in 0..16) and "class".
+    """
+    if os.path.exists(filename):
+        return filename
+    from sklearn.datasets import load_digits  # type: ignore
+
+    digits = load_digits()
+    rng = np.random.default_rng(seed)
+    pick = rng.integers(0, len(digits.data), size=rows)
+    pixels = digits.data[pick] + rng.normal(0, 1.0, size=(rows, digits.data.shape[1]))
+    df = pd.DataFrame(
+        np.clip(np.rint(pixels), 0, 16).astype("int64"),
+        columns=[f"pixel{i}" for i in range(digits.data.shape[1])],
+    )
+    df["class"] = digits.target[pick]
+    try:
+        df.to_csv(filename, index=False)
+    except (KeyboardInterrupt, SystemExit):
+        os.remove(filename)
+        raise
+    return filename

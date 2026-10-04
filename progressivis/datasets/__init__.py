@@ -10,6 +10,7 @@ from .random import (
     generate_random_parquet,
     generate_random_multivariate_normal_csv,
     generate_multiscale_random_csv,
+    generate_digits_csv,
 )
 from .wget import wget_file
 import bz2
@@ -84,6 +85,9 @@ def get_dataset(name: str, **kwds: Any) -> str:
             os.path.join(DATA_DIR, "bigfile_mvn.csv"),
             **kw
         )
+    if name == "digits":
+        kw = _check_kwds(kwds, rows=20_000)
+        return generate_digits_csv(os.path.join(DATA_DIR, "digits.csv"), **kw)
     if name == "smallfile":
         kw = _check_kwds(kwds, rows=30_000, cols=10)
         return generate_random_csv(

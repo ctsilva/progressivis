@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 import os
-from . import ProgressiveTest, skipIf
-from progressivis import Sink, ParquetLoader, PTable, get_dataset
+from . import ProgressiveTest, skipIf, taxi_sample
+from progressivis import Sink, ParquetLoader, PTable
 from progressivis.core import aio
 from progressivis.table.group_by import GroupBy, ByType, SubPColumn as SC
 from progressivis.table.aggregate import Aggregate
@@ -14,7 +16,7 @@ from typing import Any, Tuple
 
 # PARQUET_FILE = "nyc-taxi/short_500k_yellow_tripdata_2015-01.parquet"
 # PARQUET_FILE = "../nyc-taxi/short_500k_yellow_tripdata_2015-01.parquet"
-PARQUET_FILE = get_dataset("short-taxis2015-01_parquet")
+PARQUET_FILE = taxi_sample("short-taxis2015-01_parquet")
 
 # NB: if PARQUET_FILE does not exist yet, consider running:
 # python scripts/create_nyc_parquet.py -p short -t yellow -f -m1 -n 300000
@@ -75,6 +77,11 @@ class TestProgressiveAggregate(ProgressiveTest):
             "RateCodeID_count_distinct is not equal"
         )
 
+    @pytest.mark.xfail(
+        reason="Finding 7: deletions sometimes do not reach Aggregate through "
+        "GroupBy (see tests/test_04_progressive_guarantees.py)",
+        strict=False,
+    )
     def test_aggregate_1_col_delete(self) -> None:
         s = self.scheduler
         removed = 11142

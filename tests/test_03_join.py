@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from . import ProgressiveTest, skipIf
+from . import ProgressiveTest, skipIf, taxi_sample
 from progressivis.core import aio
 from progressivis import (
-    Sink, ParquetLoader, SimpleCSVLoader, Join, get_dataset
+    Sink, ParquetLoader, SimpleCSVLoader, Join
 )
 
 import pandas as pd
@@ -14,7 +14,7 @@ from io import StringIO
 from typing import Any, Sequence, Tuple, List, cast
 
 # PARQUET_FILE = "nyc-taxi/newstyle_500k_yellow_tripdata_2015-01.parquet"
-PARQUET_FILE = get_dataset("newshort-taxis2015-01_parquet")
+PARQUET_FILE = taxi_sample("newshort-taxis2015-01_parquet")
 # CSV_URL = "https://s3.amazonaws.com/nyc-tlc/misc/taxi+_zone_lookup.csv"
 CSV_URL = "https://www.aviz.fr/nyc-taxi/taxi-zone-lookup.csv.bz2"
 # CSV_URL = "../nyc-taxi/taxi+_zone_lookup.csv"

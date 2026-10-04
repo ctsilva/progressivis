@@ -24,7 +24,7 @@ PREDICT_SAMPLE_SIZE = 1000
 SAMPLE_SIZE = TRAIN_SAMPLE_SIZE + PREDICT_SAMPLE_SIZE
 RANDOM_STATE = 42
 NNEIGHBOURS = 7
-N_COMPONENTS = 154
+N_COMPONENTS = 16  # of 64 pixels, as 154 of 784 for MNIST
 TRACE = False  # 'verbose'
 LABELS = None
 INDICES = None
@@ -70,11 +70,8 @@ class TestPPCA(ProgressiveTest):
             s = Scheduler()
         else:
             s = scheduler
-        try:
-            dataset = get_dataset("mnist_784")
-        except TimeoutError:
-            print("Cannot download mnist")
-            return 0
+        # 20k jittered 8x8 digits, generated locally (the MNIST download is gone)
+        dataset = get_dataset("digits")
         data = CSVLoader(
             dataset,
             as_array="array",
@@ -141,32 +138,32 @@ class TestPPCA(ProgressiveTest):
         """
         test_reset_threshold_30k ()
         """
-        score = self._common(0.1, threshold=30000)
-        print("reset when threshold 30K=>score", score)
+        score = self._common(0.1, threshold=8_600)
+        print("reset when threshold 8.6k=>score", score)
         self.assertGreater(score, 0.77)
 
     def test_reset_threshold_40k(self) -> None:
         """
         test_reset_threshold_40k()
         """
-        score = self._common(0.1, threshold=40000)
-        print("reset when threshold 40K=>score", score)
+        score = self._common(0.1, threshold=11_400)
+        print("reset when threshold 11.4k=>score", score)
         self.assertGreater(score, 0.77)
 
     def test_reset_threshold_50k(self) -> None:
         """
         test_reset_threshold_50k()
         """
-        score = self._common(0.1, threshold=50000)
-        print("reset when threshold 50K=>score", score)
+        score = self._common(0.1, threshold=14_300)
+        print("reset when threshold 14.3k=>score", score)
         self.assertGreater(score, 0.77)
 
     def test_reset_threshold_60k(self) -> None:
         """
         test_reset_threshold_60k()
         """
-        score = self._common(0.1, threshold=60000)
-        print("reset when threshold 60K=>score", score)
+        score = self._common(0.1, threshold=17_100)
+        print("reset when threshold 17.1k=>score", score)
         self.assertGreater(score, 0.77)
 
     def test_resetter(self) -> None:
@@ -174,13 +171,13 @@ class TestPPCA(ProgressiveTest):
         test_resetter()
         """
         s = Scheduler()
-        resetter = MyResetter(threshold=30000, scheduler=s)
+        resetter = MyResetter(threshold=8_600, scheduler=s)
 
         def _func(slot: Slot) -> bool:
             return slot.data().get("reset") is True
 
         score = self._common(0.1, resetter=resetter, resetter_func=_func, scheduler=s)
-        print("resetter 30K=>score", score)
+        print("resetter 8.6k=>score", score)
         self.assertGreater(score, 0.77)
 
 

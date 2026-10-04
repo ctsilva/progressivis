@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-from . import ProgressiveTest, skipIf
+from . import ProgressiveTest
 from progressivis.core import aio
 
 from progressivis import CSVLoader, Constant, PTable, Sink
@@ -129,28 +128,23 @@ class TestProgressiveLoadCSV(ProgressiveTest):
         self.assertEqual(table["firsthalf"].shape, (bigfile_rows(), 13))
         self.assertEqual(table["secondhalf"].shape, (bigfile_rows(), 17))
 
-    @skipIf(os.getenv("CI"), "skipped because mnist file is no longer available")
     def test_as_array3(self) -> None:
         s = self.scheduler
-        try:
-            module = CSVLoader(
-                get_dataset("mnist_784"),
-                as_array=lambda cols: {"array": [c for c in cols if c != "class"]},
-                scheduler=s,
-            )
-            sink = Sink(name="sink", scheduler=s)
-            sink.input.inp = module.output.result
-            self.assertTrue(module.result is None)
-            aio.run(s.start())
-            assert module.result is not None
-            table = module.result
-            self.assertEqual(len(table), 70000)
-            self.assertEqual(table.columns, ["array", "class"])
-            self.assertEqual(table["array"].shape, (70000, 784))
-            self.assertEqual(table["class"].shape, (70000,))
-        except TimeoutError:
-            print("Cannot download mnist")
-            pass
+        module = CSVLoader(
+            get_dataset("digits"),
+            as_array=lambda cols: {"array": [c for c in cols if c != "class"]},
+            scheduler=s,
+        )
+        sink = Sink(name="sink", scheduler=s)
+        sink.input.inp = module.output.result
+        self.assertTrue(module.result is None)
+        aio.run(s.start())
+        assert module.result is not None
+        table = module.result
+        self.assertEqual(len(table), 20_000)
+        self.assertEqual(table.columns, ["array", "class"])
+        self.assertEqual(table["array"].shape, (20_000, 64))
+        self.assertEqual(table["class"].shape, (20_000,))
 
 
 if __name__ == "__main__":
