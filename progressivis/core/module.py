@@ -1185,13 +1185,16 @@ You may have added the module in a running scheduler without using the syntax: "
         """
         return False
 
-    def run(self, run_number: int) -> None:
+    def run(self, run_number: int, quantum: Optional[float] = None) -> None:
+        """Run one step. The parallel scheduler computes ``quantum`` in its event
+        loop, because interactive input state may only be read there."""
         assert not self.is_running()
         self.steps_acc = 0
         next_state = self.state
         exception = None
         now = self.timer()
-        quantum = self.scheduler.fix_quantum(self, self.params.quantum)
+        if quantum is None:
+            quantum = self.scheduler.fix_quantum(self, self.params.quantum)
         tracer = self.tracer
         if quantum == 0:
             quantum = 0.1

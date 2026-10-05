@@ -364,8 +364,8 @@ class MCScatterPlot(Module):
                 self._json_cache = None
         return self._return_run_step(self.state_blocked, steps_run=0)
 
-    def run(self, run_number: int) -> None:
-        super().run(run_number)
+    def run(self, run_number: int, quantum: Optional[float] = None) -> None:
+        super().run(run_number, quantum)
         if self._ipydata:
             return
         if self._json_cache is not None:

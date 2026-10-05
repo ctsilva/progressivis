@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import logging
 import functools
+from asyncio import CancelledError, shield
+from concurrent.futures import ThreadPoolExecutor
+from weakref import WeakKeyDictionary
 import os
 import inspect as ins  # https://github.com/python/cpython/issues/122858
 from timeit import default_timer
@@ -26,6 +29,8 @@ from typing import (
     Coroutine,
     Union,
     AsyncGenerator,
+    Awaitable,
+    Tuple,
     TYPE_CHECKING,
 )
 
@@ -44,7 +49,15 @@ if os.getenv("PROGRESSIVIS_PROFILE"):
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Scheduler"]
+__all__ = ["Scheduler", "SchedulerRunError"]
+
+
+class SchedulerRunError(RuntimeError):
+    "Multiple failures from one run, including worker and cleanup failures."
+
+    def __init__(self, errors: Sequence[BaseException]):
+        self.errors = tuple(errors)
+        super().__init__("Scheduler failures: " + "; ".join(str(e) for e in errors))
 
 KEEP_RUNNING = 5
 SHORTCUT_TIME: float = 1.5
@@ -101,7 +114,25 @@ class Scheduler:
         "Return the specified scheduler of, in None, the default one."
         return scheduler or cls.default
 
-    def __init__(self, interaction_latency: int = 1):
+    def __init__(self, interaction_latency: int = 1, workers: Optional[int] = None):
+        """
+        Args:
+            interaction_latency: target latency (s) in interactive mode
+            workers: number of modules that can run at the same time, on
+                separate threads (default: env PROGRESSIVIS_WORKERS, else 1).
+                With more than one, independent modules (no direct slot
+                connection between them) run their steps concurrently.
+        """
+        if workers is None:
+            workers = int(os.environ.get("PROGRESSIVIS_WORKERS", "1"))
+        self._workers: int = max(1, workers)
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._worker_futures: Set[aio.Future[None]] = set()
+        # Module name -> future of the step it runs on a worker thread
+        self._active_steps: Dict[str, aio.Future[None]] = {}
+        self._run_errors: List[BaseException] = []
+        self._aborted = False
+        self._ending_tasks: WeakKeyDictionary[Module, aio.Task[None]] = WeakKeyDictionary()
         if interaction_latency <= 0:
             raise ProgressiveError(
                 "Invalid interaction_latency, "
@@ -274,6 +305,8 @@ class Scheduler:
         coros: Sequence[Coroutine[Any, Any, Any]] = (),
     ) -> None:
         async with self._lock:
+            if self._aborted:
+                raise ProgressiveError("Aborted dataflow cannot restart; create a fresh scheduler")
             if self._task:
                 raise ProgressiveError(
                     "Trying to start scheduler task inside scheduler task"
@@ -294,6 +327,13 @@ class Scheduler:
         coros: Sequence[Coroutine[Any, Any, Any]] = (),
         persist: bool = False,
     ) -> None:
+        """Run the dataflow and supervise ``coros`` for this run's lifetime.
+
+        Unfinished companion coroutines are cancelled and awaited when the
+        dataflow finishes or pauses. Failure/cancellation joins running workers
+        and ends modules before returning; an aborted scheduler cannot restart.
+        Cancellation cannot preempt a worker, so cleanup has no time bound.
+        """
         from ..storage import init_temp_dir_if, cleanup_temp_dir, temp_dir
 
         if self._task:
@@ -374,29 +414,136 @@ class Scheduler:
         self._change_procs.remove(proc)
 
     async def run(self) -> None:
-        "Run the modules, called by start()."
+        "Run until completion, pause, failure or cancellation; always join workers."
         global KEEP_RUNNING
-        self.commit()
-        self._stopped = False
-        self._running = True
-        self._start = default_timer()
-        self._before_run()
-        run_loop = aio.create_task(self._run_loop())
-        shortcut_loop = aio.create_task(self.shortcut_manager())
-        runners = [run_loop, shortcut_loop]
-        runners.extend([aio.create_task(coro) for coro in self.coros])
-        for r in runners:
-            assert isinstance(r, aio.Task)
-        # TODO: find the "right" initialisation value ...
-        KEEP_RUNNING = min(50, len(self._run_list) * 3)
-        self._keep_running = KEEP_RUNNING
-        await aio.gather(*runners)
-        self._running = False
+        if self._aborted:
+            raise ProgressiveError("Aborted dataflow cannot restart; create a fresh scheduler")
+        runners: List[aio.Task[Any]] = []
+        primary: Optional[BaseException] = None
+        self._run_errors = []
+        try:
+            self.commit()
+            self._stopped = False
+            self._running = True
+            self._start = default_timer()
+            self._before_run()
+            if self._workers > 1:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self._workers, thread_name_prefix=f"progressivis-{self.name}"
+                )
+            run_loop = aio.create_task(self._run_loop())
+            runners = [run_loop, aio.create_task(self.shortcut_manager())]
+            runners.extend(aio.create_task(coro) for coro in self.coros)
+            KEEP_RUNNING = min(50, len(self._run_list) * 3)
+            self._keep_running = KEEP_RUNNING
+            pending = set(runners)
+            while pending:
+                done, pending = await aio.wait(pending, return_when=aio.FIRST_COMPLETED)
+                for task in runners:
+                    if task in done:
+                        task.result()  # surface companion errors as well as worker errors
+                if run_loop in done:
+                    break
+        except BaseException as exc:
+            primary = exc
+            self._aborted = True
+            self._stopped = True
+            if not isinstance(exc, CancelledError):
+                self._record_error(exc)
+        finally:
+            # Shield a separate cleanup task: repeated cancel() calls must not
+            # abandon workers or interrupt a module's ending hook.
+            cleanup = aio.create_task(self._finish_run(runners))
+            while True:
+                try:
+                    await shield(cleanup)
+                    break
+                except CancelledError as exc:
+                    primary = exc
+                    self._aborted = True
+                except BaseException as exc:
+                    self._record_error(exc)
+                    break
+        if isinstance(primary, CancelledError):
+            if self._run_errors:
+                raise primary from SchedulerRunError(self._run_errors)
+            raise primary
+        if len(self._run_errors) == 1:
+            raise self._run_errors[0]
+        if self._run_errors:
+            raise SchedulerRunError(self._run_errors) from primary
 
+    def _record_error(self, exc: BaseException) -> None:
+        if not any(exc is old for old in self._run_errors):
+            self._run_errors.append(exc)
+        self._aborted = True
         self._stopped = True
-        self._task = False
-        self._after_run()
-        self.done()
+
+    def _worker_done(self, future: aio.Future[None]) -> None:
+        self._worker_futures.discard(future)
+        if not future.cancelled():
+            exc = future.exception()
+            if exc is not None:
+                self._record_error(exc)
+
+    async def _end_module(self, module: Module) -> None:
+        # Retain the task even if its waiter is cancelled: cleanup awaits the
+        # same invocation rather than calling ending() twice.
+        if module not in self._ending_tasks:
+            self._ending_tasks[module] = aio.create_task(module.ending())
+        await shield(self._ending_tasks[module])
+
+    async def _finish_run(self, runners: Sequence[aio.Task[Any]]) -> None:
+        self._stopped = True
+        try:
+            if not runners:
+                # Setup failed before companion coroutines became tasks.
+                for coro in self.coros:
+                    coro.close()
+            for task in runners:
+                if not task.done():
+                    task.cancel()
+            results = await aio.gather(*runners, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(result, CancelledError):
+                    self._record_error(result)
+            # asyncio.wait in the run loop never cancels executor futures.
+            # Joining asynchronously keeps input/timers and worker dependencies
+            # on this event loop alive until the threads have actually finished.
+            if self._worker_futures:
+                await aio.gather(*self._worker_futures, return_exceptions=True)
+            self._active_steps.clear()
+            if self._executor is not None:
+                self._executor.shutdown(wait=True)
+                self._executor = None
+            aborted_before_hooks = self._aborted
+            if aborted_before_hooks:
+                await self._end_all_modules()
+            elif self._ending_tasks:
+                for result in await aio.gather(*self._ending_tasks.values(), return_exceptions=True):
+                    if isinstance(result, BaseException):
+                        self._record_error(result)
+            for hook in (self._after_run, self.done):
+                try:
+                    hook()
+                except BaseException as exc:
+                    self._record_error(exc)
+            # A final hook or cancellation during normal cleanup can turn a
+            # resumable pause into an abort. It still needs module teardown.
+            if self._aborted and not aborted_before_hooks:
+                await self._end_all_modules()
+        finally:
+            self._running = False
+            self._stopped = True
+            self._task = False
+
+    async def _end_all_modules(self) -> None:
+        modules = set(self._modules.values()) | self._deleted_modules | set(self._ending_tasks)
+        for module in sorted(modules, key=lambda m: m.order, reverse=True):
+            try:
+                await self._end_module(module)
+            except BaseException as exc:
+                self._record_error(exc)
 
     async def shortcut_manager(self) -> None:
         while not self._stopped and self._run_list:
@@ -407,47 +554,166 @@ class Scheduler:
             self._module_selection = None
             self.shortcut_evt.clear()
 
+    @staticmethod
+    def _neighbors(module: Module) -> Set[str]:
+        "Names of the modules directly connected to ``module`` by a slot"
+        names = {slot.output_module.name for slot in module.input_slot_values()}
+        for slots in module.output_slot_values():
+            for slot in slots or []:
+                if slot.input_module is not None:
+                    names.add(slot.input_module.name)
+        return names
+
     async def _run_loop(self) -> None:
         """Main scheduler loop."""
+        from .module import Module
         # pylint: disable=broad-except
         blocked = 0  # all_blocked() cannot detect that all modules are blocked
         profiler = self.profiler
+        # Parallel mode (workers > 1): a module starts on a worker thread as
+        # soon as a worker is free and no module directly connected to it is
+        # running. Otherwise it is deferred to later in the same sweep, as are
+        # the modules whose producer is deferred: each module still runs after
+        # its producers, as in the serial order. Callbacks (start_run,
+        # after_run, tick procs) and slot preparation stay in this loop.
+        running: Dict[aio.Future[None], Tuple[Module, int]] = {}
+        deferred: List[Module] = []
+        last_order = -1
+
+        def busy(module: Module) -> bool:
+            for other, _ in running.values():
+                if other is module or other.name in self._neighbors(module):
+                    return True
+            return any(
+                slot.output_module in deferred for slot in module.input_slot_values()
+            )
+
+        async def complete(all_running: bool = False) -> None:
+            "Wait for at least one running module and finish it"
+            # Tick callbacks have unrestricted access to the graph. They may
+            # run only once every active worker has left its step.
+            wait_all = all_running or bool(self._tick_procs)
+            done, _ = await aio.wait(
+                list(running),
+                return_when=aio.ALL_COMPLETED if wait_all else aio.FIRST_COMPLETED,
+            )
+            errors: List[BaseException] = []
+            successes = []
+            for fut in sorted(done, key=lambda f: running[f][1]):
+                module, run_number = running.pop(fut)
+                if self._active_steps.get(module.name) is fut:
+                    del self._active_steps[module.name]
+                exc = fut.exception()
+                if exc is not None:
+                    errors.append(exc)
+                else:
+                    successes.append((module, run_number))
+            if errors:
+                raise errors[0]
+            for module, run_number in successes:
+                await module.after_run(run_number)
+            await self._run_tick_procs()
+
+        async def offer(module: Module) -> bool:
+            "Start the module if possible; False if it must wait"
+            nonlocal blocked
+            if self._stopped:
+                return True  # paused/aborted: discard unstarted work
+            if busy(module):
+                return False
+            # Unrestricted lifecycle callbacks (including subclass hooks) run
+            # with no other module active. Callback-free modules retain task
+            # parallelism. Register callbacks before starting the scheduler.
+            exclusive = bool(module._start_run or module._after_run) or any(
+                getattr(type(module), name, getattr(Module, name))
+                is not getattr(Module, name)
+                for name in ("start_run", "after_run")
+            )
+            if exclusive and running:
+                await complete(all_running=True)
+            if self._stopped:
+                return True
+            if not self._consider_module(module):
+                logger.info(
+                    "Module %s not scheduled because of interactive mode",
+                    module.name,
+                )
+            elif self._schedule(module):
+                blocked = 0
+                await module.start_run(self._run_number)
+                if self._stopped:
+                    return True
+                # Interactive input state belongs to this loop: compute the
+                # quantum here rather than in the worker.
+                quantum = self.fix_quantum(module, module.params.quantum)
+                loop = aio.get_running_loop()
+                fut = loop.run_in_executor(
+                    self._executor, module.run, self._run_number, quantum
+                )
+                running[fut] = (module, self._run_number)
+                self._active_steps[module.name] = fut
+                self._worker_futures.add(fut)
+                fut.add_done_callback(self._worker_done)
+                if exclusive or len(running) >= self._workers:
+                    await complete()
+            else:
+                blocked += 1
+            return True
+
+        async def drain() -> None:
+            "Finish the sweep: run the deferred modules, wait for all"
+            nonlocal deferred
+            while deferred or running:
+                pending, deferred = deferred, []
+                for module in pending:
+                    if not await offer(module):
+                        deferred.append(module)
+                if running:
+                    await complete()
+
         try:
-            async for module in self._next_module():
+            async for module in self._next_module(before_update=drain):
                 await aio.sleep(0)
+                if self._stopped:
+                    break
+                if module.order <= last_order:  # a new sweep started early
+                    await drain()
+                last_order = module.order
                 if (
                     self.no_more_data()
                     and (self.all_blocked() or blocked == len(self._run_list))
                     and self.is_waiting_for_input()
                 ):
                     if self._keep_running <= 0:
+                        await drain()
                         async with self._hibernate_cond:
                             await self._hibernate_cond.wait()
                 if self._keep_running > 0:
                     self._keep_running -= 1
-                if not self._consider_module(module):
+                if self._workers > 1:
+                    if not await offer(module):
+                        deferred.append(module)
+                elif not self._consider_module(module):
                     logger.info(
                         "Module %s not scheduled because of interactive mode",
                         module.name,
                     )
-                    continue
-                # increment the run number, even if we don't call the module
-                self._run_number += 1
-                module.prepare_run(self._run_number)
-                if not (module.is_ready() or self.has_input() or module.is_greedy()):
-                    logger.info(
-                        "Module %s not scheduled because not ready and has no input",
-                        module.name,
-                    )
+                elif self._schedule(module):
+                    blocked = 0
+                    profiler.enable()
+                    await module.start_run(self._run_number)
+                    if self._stopped:
+                        break
+                    module.run(self._run_number)
+                    await module.after_run(self._run_number)
+                    await self._run_tick_procs()
+                    profiler.disable()
+                else:
                     blocked += 1
-                    continue
-                blocked = 0
-                profiler.enable()
-                await module.start_run(self._run_number)
-                module.run(self._run_number)
-                await module.after_run(self._run_number)
-                await self._run_tick_procs()
-                profiler.disable()
+                if self._run_index >= len(self._run_list):  # end of the sweep
+                    await drain()
+                    last_order = -1
+            await drain()
             if self.shortcut_evt is not None:
                 self.shortcut_evt.set()
         except Exception as exc:
@@ -456,7 +722,22 @@ class Scheduler:
             raise
         print("Leaving run loop")
 
-    async def _next_module(self) -> AsyncGenerator[Module, None]:
+    def _schedule(self, module: Module) -> bool:
+        "Prepare the module for a run; return True if it should run"
+        # increment the run number, even if we don't call the module
+        self._run_number += 1
+        module.prepare_run(self._run_number)
+        if not (module.is_ready() or self.has_input() or module.is_greedy()):
+            logger.info(
+                "Module %s not scheduled because not ready and has no input",
+                module.name,
+            )
+            return False
+        return True
+
+    async def _next_module(
+        self, before_update: Optional[Callable[[], Awaitable[None]]] = None
+    ) -> AsyncGenerator[Module, None]:
         """
         Generator the yields a possibly infinite sequence of modules.
         Handles order recomputation and starting logic if needed.
@@ -467,11 +748,16 @@ class Scheduler:
         while not self._stopped:
             # Apply changes in the dataflow
             if self.dataflow is not None and self._enter_cnt == 0:
+                # Reconnection and teardown must not race an old graph's
+                # workers. Drain before mutating, not after yielding its new
+                # first module to the run loop.
+                if before_update is not None:
+                    await before_update()
                 self._update_modules()
                 self._run_index = 0
             if self._deleted_modules:
                 for mod in self._deleted_modules:
-                    await mod.ending()
+                    await self._end_module(mod)
             if self._added_modules or self._deleted_modules:
                 added = self._added_modules
                 deleted = self._deleted_modules
@@ -601,7 +887,7 @@ class Scheduler:
         new_list = [m for m in self._run_list if not m.is_terminated()]
         terminated_list = [m for m in self._run_list if m.is_terminated()]
         for mod in terminated_list:
-            await mod.ending()
+            await self._end_module(mod)
 
         self._run_list = new_list
         await self._loop_procs.fire(self, self._run_number)
@@ -643,7 +929,11 @@ class Scheduler:
         await self._tick_procs.fire(self, self._run_number)
 
     async def stop(self) -> None:
-        "Stop the execution."
+        """Request a resumable pause; await start's task to join active steps.
+
+        Unstarted work is deferred until the next start(). Cancelling the start
+        task instead aborts the dataflow and runs module teardown.
+        """
         self._stopped = True
         if self.shortcut_evt is not None:
             self.shortcut_evt.set()
@@ -733,8 +1023,14 @@ class Scheduler:
         """
         Notify this scheduler that the module has received input
         that should be served fast.
+
+        In parallel mode, return only once the module is not running a step
+        on a worker: the caller then changes the module before its next step,
+        never during one (no await may follow this call before the change).
         """
         await self.wake_up()
+        while (step := self._active_steps.get(module.name)) is not None and not step.done():
+            await aio.wait([step])
         sel = self._reachability.get(module.name, None)
         if sel:
             if not self._module_selection:
@@ -778,12 +1074,9 @@ class Scheduler:
 
     def fix_quantum(self, module: Module, quantum: float) -> float:
         "Fix the quantum of the specified module"
-        if (
-            self.has_input()
-            and self._module_selection  # redundant
-            and module.name in self._module_selection
-        ):
-            quantum = self.time_left() / len(self._module_selection)
+        selection = self._module_selection if self.has_input() else None
+        if selection and module.name in selection:
+            quantum = self.time_left() / len(selection)
         if quantum == 0:
             quantum = 0.1
             logger.info(
