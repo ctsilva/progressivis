@@ -29,21 +29,30 @@ RESERVOIR_SIZE = 10000
 
 
 def make_mv_blobs(
-    means: List[float], covs: List[float], n_samples: int, **kwds: Any
+    means: List[float],
+    covs: List[float],
+    n_samples: int,
+    random_state: Optional[np.random.RandomState] = None,
+    **kwds: Any,
 ) -> np.ndarray[Any, Any]:
+    """
+    random_state: generator to draw from; by default numpy's global one.
+    Modules pass their own, so concurrent modules do not share random state.
+    """
+    rng = np.random.mtrand._rand if random_state is None else random_state
     assert len(means) == len(covs)
     n_blobs = len(means)
     size = n_samples // n_blobs
     blobs = []
     labels = []
     for i, (mean, cov) in enumerate(zip(means, covs)):
-        blobs.append(np.random.multivariate_normal(mean, cov, size, **kwds))
+        blobs.append(rng.multivariate_normal(mean, cov, size, **kwds))
         arr = np.empty(size, dtype="int64")
         arr[:] = i
         labels.append(arr)
     blobs_ = np.concatenate(blobs)
     labels_ = np.concatenate(labels)
-    return multi_shuffle(blobs_, labels_)  # type: ignore
+    return multi_shuffle(blobs_, labels_, random_state=rng)  # type: ignore
 
 
 def xy_to_dict(
@@ -284,9 +293,14 @@ class MVBlobsPTable(BlobsPTableABC):
         self.covs = covs
 
     def fill_reservoir(self) -> None:
-        np.random.seed(self.seed)
+        # A private generator, seeded as before: same data as seeding the
+        # global one, but independent of other modules running concurrently.
         X, y = make_mv_blobs(
-            n_samples=RESERVOIR_SIZE, means=self.means, covs=self.covs, **self._kwds
+            n_samples=RESERVOIR_SIZE,
+            means=self.means,
+            covs=self.covs,
+            random_state=np.random.RandomState(self.seed),
+            **self._kwds,
         )
         self.seed += 1
         self._reservoir = (X, y)

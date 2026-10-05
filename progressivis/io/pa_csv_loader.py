@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+
 import logging
 import copy
 from functools import partial
@@ -184,6 +186,11 @@ class PACSVLoader(BaseLoader):
                 raise ValueError("Recovery failed")
             if is_str(self._last_opened):
                 return self.open(self._last_opened)
+            if isinstance(self._last_opened, BytesIO):
+                # An independent stream over the same bytes: the previous
+                # reader may still read ahead from the old one in its own
+                # threads (without the GIL, a shared stream gets corrupted).
+                return BytesIO(self._last_opened.getbuffer())
             if hasattr(self._last_opened, "seek"):
                 self._last_opened.seek(
                     0

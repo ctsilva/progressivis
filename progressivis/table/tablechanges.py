@@ -4,6 +4,8 @@ in tables/columns.
 """
 from __future__ import annotations
 
+import threading
+
 
 import logging
 
@@ -55,6 +57,10 @@ class PTableChanges(BaseChanges):
             Bookmark
         ] = []  # list of bookmarks synchronized with times
         self._mid_time: Dict[str, int] = {}  # time associated with last mid update
+        # With the parallel scheduler, several consumers of this table can
+        # update or reset their slots at the same time (the producer itself
+        # never runs concurrently with its consumers).
+        self._lock = threading.Lock()
 
     def _last_update(self) -> Optional[Delta]:
         "Return the last delta to update"
@@ -98,12 +104,15 @@ class PTableChanges(BaseChanges):
         # We need to create a Bookmark associated with this time,
         # unless there's already one, and then it should be the last
         # TODO there's a bug down here
-        if self._times and self._times[-1] == time:
-            # We found a bookmark for time
-            bookmark = self._bookmarks[-1]
-            bookmark.refcount += 1
+        i = self._saved_index(time)
+        if i != -1:
+            # We found a bookmark for time. It is normally the last one; with
+            # the parallel scheduler, a consumer can reset its slot during its
+            # step after another consumer of this table, in the same wave,
+            # registered a later time. The producer does not run during a
+            # wave, so no change was recorded in between: reusing is exact.
+            self._bookmarks[i].refcount += 1
             return
-        assert self._saved_index(time) == -1  # double check
         # We create a new bookmark
         bookmark = Bookmark(time)
         self._times.append(time)
@@ -140,6 +149,12 @@ class PTableChanges(BaseChanges):
         update.add_deleted(locs)
 
     def compute_updates(
+        self, last: int, now: int, mid: str, cleanup: bool = True
+    ) -> Optional[Delta]:
+        with self._lock:
+            return self._compute_updates(last, now, mid, cleanup)
+
+    def _compute_updates(
         self, last: int, now: int, mid: str, cleanup: bool = True
     ) -> Optional[Delta]:
         assert mid is not None
@@ -181,6 +196,10 @@ class PTableChanges(BaseChanges):
         return new_u
 
     def reset(self, mid: str) -> None:
+        with self._lock:
+            self._reset(mid)
+
+    def _reset(self, mid: str) -> None:
         if mid not in self._mid_time:
             logger.debug(f"Reset received for slot {mid}, ignored")
             return

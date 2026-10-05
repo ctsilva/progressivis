@@ -20,6 +20,7 @@ from .hierarchy import GroupImpl, AttributeImpl
 from ..core.settings import VARS
 from .mmap_enc import MMapObject
 import atexit
+import threading
 
 from typing import Union, Optional, Any, TYPE_CHECKING, cast, List, Iterable, Dict
 
@@ -38,14 +39,19 @@ PAGESIZE = mm.PAGESIZE
 FACTOR = 1
 
 
+# Modules may create their first tables concurrently (parallel scheduler)
+_TEMP_DIR_LOCK = threading.Lock()
+
+
 def init_temp_dir_if() -> bool:
     from . import IS_PERSISTENT
 
     if not IS_PERSISTENT:
         return False
-    if VARS.get("TEMP_DIR") is None:
-        VARS["TEMP_DIR"] = mkdtemp(prefix=TEMP_DIR_PREFIX)
-        return True
+    with _TEMP_DIR_LOCK:
+        if VARS.get("TEMP_DIR") is None:
+            VARS["TEMP_DIR"] = mkdtemp(prefix=TEMP_DIR_PREFIX)
+            return True
     return False
 
 
@@ -410,10 +416,11 @@ class MMapGroup(GroupImpl):
         "Return the path of the directory for that group"
         if self.parent is None:
             init_temp_dir_if()
-            if temp_dir() is None:
-                # Not the default (persistent) engine, but used explicitly:
-                # still needs a directory, never the literal "None".
-                VARS["TEMP_DIR"] = mkdtemp(prefix=TEMP_DIR_PREFIX)
+            with _TEMP_DIR_LOCK:
+                if temp_dir() is None:
+                    # Not the default (persistent) engine, but used explicitly:
+                    # still needs a directory, never the literal "None".
+                    VARS["TEMP_DIR"] = mkdtemp(prefix=TEMP_DIR_PREFIX)
             VARS["REMOVE_TEMP_DIR_AT_EXIT"] = True
             return os.path.join(str(temp_dir()), self._name)
         parent = cast(MMapGroup, self.parent)
