@@ -29,7 +29,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
   shielded cleanup, once-only ending hooks, aggregated errors, consistent stopped
   flags and rejection of aborted-dataflow restart. `stop()` remains resumable;
   companion coroutines are scoped to the run. Nine lifecycle regression tests.
-- Next: isolate KLL's oracle/approximation issue; audit hidden storage aliases and custom-module access;
+- Next: audit hidden storage aliases and custom-module access;
   BLAS thread control and 3.14t CI; interaction benchmarks and ≥32-core evaluation.
   Then review/commit Phase 1 and decide whether to share Phases 0–0.5 upstream.
 - Run quick tests: `.venv/bin/python -m pytest tests`; parallel scheduler:
@@ -202,11 +202,13 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
       current follow-up validation is recorded above
 - [x] `tests/test_05_parallel_scheduler.py`: connected modules never overlap (fails when the scheduler is
       sabotaged), modules do run concurrently, exact results, prefix consistency under parallelism
-- [~] Intermittent failure, first observed with 3.14t + 4 workers and now also standard Python / 1 worker: `test_03_kll::test_kll3` (1 in ~5 full runs).
-      Previously passed 20/20 serially on 3.14; a later full run failed there too. Already skipped on CI ("randomly fails on CI"). Two suspects, not yet
-      separated: (a) datasketches is not free-threading-safe and we force `PYTHON_GIL=0`; (b) the test
-      compares a chunk-by-chunk KLL with a batch KLL, and KLL results depend on chunking (timing).
-      Next: run it 20x on 3.14 with 4 workers, and 20x on 3.14t serially; check `compare()` tolerance
+- [x] Intermittent `test_03_kll::test_kll3` failure: a test tolerance problem, not threading or
+      datasketches. KLL is randomized; a K=300 PMF is within +-0.011 per sketch (99%), and the test
+      compared two independent sketches with atol 0.01. Two batch sketches of the same data, no
+      scheduler, exceed it ~3% of the time on both builds. Tests now compare ranks (quantiles, and
+      PMFs as cumulative sums) within twice datasketches' rank error: 0/80 failures across
+      std/ft x 1/4 workers, and a planted bug (values < 0.05 dropped) still fails 5 of 6 tests
+      (`test_kll3` derives its bins from each sketch's own range, so it cannot see that bug).
 - [x] Reconsider deferred work before waiting at sweep drain; regression test
 - [x] Quiescent boundaries for start/after callbacks, tick callbacks, graph edits; regression tests
 - [x] Explicit ownership/lifecycle assumptions documented; no general alias enforcement yet

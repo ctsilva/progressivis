@@ -12,6 +12,13 @@ QUANTILES = [0.3, 0.5, 0.7]
 NAMED_QUANTILES = ["first", "second", "third"]
 SPLITS_SEQ = [0.3, 0.5, 0.7]
 SPLITS_DICT = dict(lower=0.1, upper=0.9, n_splits=10)
+# KLL is randomized: each sketch is within its normalized rank error with 99%
+# confidence, and the tests compare two independent sketches (a fixed 0.01
+# on PMFs failed ~3% of the time even for two batch sketches of the same data).
+# Ranks are compared: quantile values are ranks for data uniform on [0, 1], and
+# PMFs as cumulative sums; bins of ~0.008 each, compared one by one at the
+# error bound, would hide real errors.
+RANK_ATOL = 2 * kll_floats_sketch.get_normalized_rank_error(K, False)
 
 ArrayLike = Union[np.ndarray[Any, Any], Sequence[Any]]
 
@@ -96,7 +103,7 @@ class TestKll(ProgressiveTest):
         num_splits = BINS
         splits = np.linspace(min_, max_, num_splits)
         pmf = sk.get_pmf(splits[:-1])
-        self.compare(kll.result["pmf"], pmf)
+        self.compare(np.cumsum(kll.result["pmf"]), np.cumsum(pmf))
 
     def test_kll4(self) -> None:
         np.random.seed(42)
@@ -114,7 +121,7 @@ class TestKll(ProgressiveTest):
         sk = kll_floats_sketch(K)
         sk.update(val)
         pmf = sk.get_pmf(SPLITS_SEQ)
-        self.compare(kll.result["pmf"], pmf)
+        self.compare(np.cumsum(kll.result["pmf"]), np.cumsum(pmf))
 
     def test_kll5(self) -> None:
         np.random.seed(42)
@@ -136,9 +143,11 @@ class TestKll(ProgressiveTest):
         num_splits = cast(int, SPLITS_DICT["n_splits"])
         splits = np.linspace(lower_, upper_, num_splits)
         pmf = sk.get_pmf(splits[:-1])
-        self.compare(kll.result["pmf"], pmf)
+        self.compare(np.cumsum(kll.result["pmf"]), np.cumsum(pmf))
 
-    def compare(self, res1: ArrayLike, res2: ArrayLike, atol: float = 1e-02) -> None:
+    def compare(
+        self, res1: ArrayLike, res2: ArrayLike, atol: float = RANK_ATOL
+    ) -> None:
         v1 = np.array(res1)
         v2 = np.array(res2)
         self.assertEqual(v1.shape, v2.shape)
