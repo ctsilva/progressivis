@@ -29,8 +29,8 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
   shielded cleanup, once-only ending hooks, aggregated errors, consistent stopped
   flags and rejection of aborted-dataflow restart. `stop()` remains resumable;
   companion coroutines are scoped to the run. Nine lifecycle regression tests.
-- Next: audit hidden storage aliases and custom-module access;
-  BLAS thread control and 3.14t CI; interaction benchmarks and ≥32-core evaluation.
+- Next: run the 3.14t CI job on GitHub; audit hidden storage aliases and custom-module
+  access; interaction benchmarks and ≥32-core evaluation.
   Then review/commit Phase 1 and decide whether to share Phases 0–0.5 upstream.
 - Run quick tests: `.venv/bin/python -m pytest tests`; parallel scheduler:
   `PROGRESSIVIS_WORKERS=4 ...`; free-threaded:
@@ -219,8 +219,13 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
       the module's running step; regression tests
 - [ ] Audit aliasing views, custom preparation hooks and unsynchronized external readers
 - [ ] Interaction: `for_input()` limits eligibility already (via `_consider_module`); reserve cores later
-- [ ] Control BLAS/numpy threads (oversubscription) — threadpoolctl
-- [ ] CI job on 3.14t; fail if GIL is re-enabled at import
+- [x] Control BLAS/OpenMP threads (oversubscription): with workers > 1, threadpoolctl limits them to
+      cores // workers while the scheduler runs (`blas_threads=`, env `PROGRESSIVIS_BLAS_THREADS`,
+      0 = unchanged); process-wide, restored at the end of the run; test fails with the limit disabled
+- [~] CI job on 3.14t (`free-threaded` in `.github/workflows/python.yml`, plus `workflow_dispatch`):
+      `scripts/check_free_threading.py` fails if a module other than `_datasketches` re-enables the
+      GIL; then the full suite with `PYTHON_GIL=0`, 4 workers. Steps pass locally (macOS); not yet run
+      on GitHub (Linux 3.14t wheels for all dependencies unverified)
 - [x] Benchmark result availability, update gaps and step overruns; repeated comparisons and JSON
 - [ ] Instrument UI interaction latency, readiness delay, quality targets, memory and change-log backlog
 - [ ] Measure on a ≥ 32-core machine (taxi heatmap, scaler demo, PPCA), including latency criteria

@@ -114,7 +114,12 @@ class Scheduler:
         "Return the specified scheduler of, in None, the default one."
         return scheduler or cls.default
 
-    def __init__(self, interaction_latency: int = 1, workers: Optional[int] = None):
+    def __init__(
+        self,
+        interaction_latency: int = 1,
+        workers: Optional[int] = None,
+        blas_threads: Optional[int] = None,
+    ):
         """
         Args:
             interaction_latency: target latency (s) in interactive mode
@@ -122,10 +127,25 @@ class Scheduler:
                 separate threads (default: env PROGRESSIVIS_WORKERS, else 1).
                 With more than one, independent modules (no direct slot
                 connection between them) run their steps concurrently.
+            blas_threads: with more than one worker, threads that BLAS and
+                OpenMP libraries (numpy, scipy, scikit-learn) may use while
+                the scheduler runs, so that the workers do not oversubscribe
+                the cores (default: env PROGRESSIVIS_BLAS_THREADS, else
+                cores // workers; 0 leaves the libraries unchanged). The limit
+                is process-wide and restored when the run ends.
         """
         if workers is None:
             workers = int(os.environ.get("PROGRESSIVIS_WORKERS", "1"))
         self._workers: int = max(1, workers)
+        if blas_threads is None:
+            env = os.environ.get("PROGRESSIVIS_BLAS_THREADS")
+            if env is not None:
+                blas_threads = int(env)
+            else:
+                cores = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+                blas_threads = max(1, cores // self._workers)
+        self._blas_threads: int = max(0, blas_threads)
+        self._thread_limits: Any = None  # threadpoolctl limits while running
         self._executor: Optional[ThreadPoolExecutor] = None
         self._worker_futures: Set[aio.Future[None]] = set()
         # Module name -> future of the step it runs on a worker thread
@@ -431,6 +451,10 @@ class Scheduler:
                 self._executor = ThreadPoolExecutor(
                     max_workers=self._workers, thread_name_prefix=f"progressivis-{self.name}"
                 )
+                if self._blas_threads:
+                    from threadpoolctl import threadpool_limits  # type: ignore
+
+                    self._thread_limits = threadpool_limits(limits=self._blas_threads)
             run_loop = aio.create_task(self._run_loop())
             runners = [run_loop, aio.create_task(self.shortcut_manager())]
             runners.extend(aio.create_task(coro) for coro in self.coros)
@@ -516,6 +540,9 @@ class Scheduler:
             if self._executor is not None:
                 self._executor.shutdown(wait=True)
                 self._executor = None
+            if self._thread_limits is not None:
+                self._thread_limits.restore_original_limits()
+                self._thread_limits = None
             aborted_before_hooks = self._aborted
             if aborted_before_hooks:
                 await self._end_all_modules()

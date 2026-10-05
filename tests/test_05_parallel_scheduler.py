@@ -8,11 +8,12 @@ actually runs modules concurrently, and that results stay exact.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -286,6 +287,31 @@ class TestParallelScheduler(ProgressiveTest):
         finally:
             setattr(Scheduler, "fix_quantum", original)
         self.assertEqual(threads, {threading.get_ident()})
+
+    def test_blas_threads_limited_while_running(self) -> None:
+        import sklearn.utils  # type: ignore  # noqa: F401  loads OpenMP; numpy may load a BLAS
+        from threadpoolctl import threadpool_info  # type: ignore
+
+        before = [pool["num_threads"] for pool in threadpool_info()]
+        if not before:
+            self.skipTest("no BLAS/OpenMP thread pool detected")
+        during: List[List[int]] = []
+        s = Scheduler(workers=WORKERS, blas_threads=1)
+        _pipelines(s, 1)
+        s.on_tick(lambda *_: during.append([p["num_threads"] for p in threadpool_info()]))
+        aio.run(s.start())
+        self.assertTrue(during)
+        self.assertTrue(all(n == 1 for counts in during for n in counts), during[0])
+        self.assertEqual([pool["num_threads"] for pool in threadpool_info()], before)
+
+    def test_blas_threads_default(self) -> None:
+        cores = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+        with patch.dict(os.environ):
+            os.environ.pop("PROGRESSIVIS_BLAS_THREADS", None)
+            self.assertEqual(Scheduler(workers=4)._blas_threads, max(1, cores // 4))
+            self.assertEqual(Scheduler(workers=4, blas_threads=0)._blas_threads, 0)
+            os.environ["PROGRESSIVIS_BLAS_THREADS"] = "3"
+            self.assertEqual(Scheduler(workers=4)._blas_threads, 3)
 
     def test_results_are_exact(self) -> None:
         s = Scheduler(workers=WORKERS)
