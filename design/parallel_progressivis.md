@@ -1,7 +1,7 @@
 # Parallel ProgressiVis: bringing PDS-style parallelism to progressive analytics
 
-*Design note — October 2026. Status: Phase 0 done (branch `parallel-scheduler`);
-test-suite cleanup in progress; Phase 1 not started. Day-to-day tracking: [`PLAN.md`](../PLAN.md).*
+*Design note — October 2026. Status: Phases 0 and 0.5 done; Phase 1 (parallel
+scheduler) implemented and being validated (branch `parallel-scheduler`). Day-to-day tracking: [`PLAN.md`](../PLAN.md).*
 
 ## 1. Summary
 
@@ -48,9 +48,18 @@ dataflow that can be modified while running.
 
 ## 3. What we take from PDS — and what we don't (yet)
 
-**Take now: task parallelism.** Independent branches run concurrently. Safety
-follows PDS's rule — *no two directly connected modules run at the same time* —
-but enforced by construction (wave selection) instead of locks.
+**Take now: task parallelism with explicit data ownership.** Independent branches
+run concurrently. PDS locks output connections until consumers release their
+inputs (CiSE 2011, pp. 77–78); excluding adjacent executions is a consequence of
+that data-lifetime rule. ProgressiVis enforces adjacency exclusion plus producer
+ordering within a sweep and a barrier between sweeps. This is sufficient only
+under the ownership and callback assumptions below; adjacency alone is not a
+proof when outputs alias upstream storage.
+
+PDS also provides `ReleaseInputs()` after copying inputs and `PushNoLock()` when
+outputs occupy independent memory. A restricted copy-and-release experiment may
+therefore be useful before a general storage redesign. These are capabilities
+with explicit data-lifetime obligations, not blanket exemptions from safety.
 
 **Take later: data parallelism.** Split a step's rows across threads and merge
 partial results. Fits ProgressiVis well because most of its accumulators are
@@ -58,8 +67,8 @@ already mergeable (min, max, sum/mean/variance via Chan's formula, histograms,
 KLL sketches).
 
 **Take last: pipeline parallelism.** Producer works on new rows while consumer
-reads earlier ones. Requires producers not to reallocate data under readers,
-i.e. a change in table storage (see Phase 3).
+reads earlier ones. Requires stable input versions, reader lifetimes and bounded
+buffering as well as storage that cannot reallocate under readers (see Phase 3).
 
 **Not adopted:** PDS's push/pull execution model and block-number ordering.
 ProgressiVis keeps its own time-quantum scheduler; parallelism only lets more
@@ -125,7 +134,9 @@ converts the slice to a `PIntSet` (`table/table_base.py:964`), which reaches
 
 Adding `PIntSet.__array__` (via `BitMap.to_array()`) made pipelines **3–4x
 faster**; converting contiguous ranges back to slices (`to_slice_maybe()`
-already exists) avoids the copy entirely. The slow path also held the GIL,
+already exists) avoids expensive index conversion. The implemented read path
+still returns a copy; zero-copy reads require a separate mutation audit.
+The slow path also held the GIL,
 which is why threads gave nothing on the standard build.
 
 **Finding 2 — parallelism requires free-threaded Python.** With the GIL, the
@@ -137,6 +148,19 @@ re-enables the GIL because `_datasketches` (used only by `KLLSketch`) does not
 declare free-threading support. Runs above used `PYTHON_GIL=0`, safe there
 because KLL was not used. Also, `datasketches` and `duckdb` have no 3.14t
 wheels and build from source (~10 min).
+
+**Phase 1 measurements (parallel scheduler).** One scheduler, 4 workers,
+1M rows per source, on the same busy laptop:
+
+| Dataflow | 3.14 (GIL) | 3.14t (no GIL) |
+|---|---|---|
+| 4 independent pipelines | 1.11x | 2.13x (CPU/wall 3.1) |
+| 1 source → 4 `Histogram2D` + `Min`/`Max`/`Var` | 1.35x | 1.39x |
+
+The upper bound for the first case (4 separate schedulers in 4 threads) is
+~2.3x. The fan-out case is limited by its source, which runs alone because
+every other module is connected to it; pipeline parallelism (Phase 3) is what
+lifts that limit.
 
 **Finding 4 — idle time (fixed).** Every serial run showed CPU/wall ≈ 0.8.
 Cause: when all modules were blocked at the end of a sweep, the scheduler
@@ -213,28 +237,31 @@ Desktops now ship with 16–24 cores, workstations with 64–96, and servers wit
 128–192. A single-threaded ProgressiVis uses one of them. The opportunity is
 large, but it is worth being precise about where the speedup comes from.
 
-### 6.1 The progressive payoff: more data per quantum
+### 6.1 The progressive payoff is a hypothesis to measure
 
-In a progressive system, parallelism does not just finish sooner; it changes
-*what the user sees at a fixed latency*. If a quantum processes P times more
-rows, then for estimators whose error shrinks like 1/√n (means, variances,
-histogram bin frequencies, quantile sketches):
+Task parallelism increases aggregate throughput across branches; it need not
+increase the rows processed by a particular module per quantum. Contention can
+even increase step duration. The intended payoff is more useful results at a
+fixed latency, which must be measured at the output the analyst actually uses.
 
-- at the same latency, the error is **√P smaller** (16 cores → 4x tighter), or
-- the same accuracy is reached **P times sooner** (16 cores → 16x faster to a
-  given confidence interval).
+If the measured number of relevant observations at that output increases by P,
+then an estimator with 1/√n sampling error can have √P smaller uncertainty,
+under its sampling and moment assumptions. P is a throughput ratio, not a core
+count. File-order prefixes generally do not support population-confidence claims.
 
-For "until convergence" workloads (k-means, PPCA, t-SNE) more rows per quantum
-means fewer quanta to a stable picture. This is the combined ProgressiVis + PDS
-value proposition: **interactive latency of progressive analytics, with the
-throughput of parallel dataflow.**
+Sampling uncertainty and algorithmic approximation error are distinct. KLL's
+normalized rank error is governed by its configured K, not a general 1/√n law
+as the stream grows (see the DataSketches reference). More rows also do not by
+themselves prove faster convergence for k-means, PPCA or t-SNE. Measure time to
+a declared quality target for each algorithm, including preprocessing and merges.
 
-### 6.2 Interaction no longer starves the background
+### 6.2 Future interaction resource allocation
 
 Today, when the user interacts, `Scheduler.for_input()` restricts scheduling to
 modules reachable from the input; everything else pauses until the latency
 budget is met. With many cores, interactive modules can get dedicated cores
-while the background computation keeps going.
+while the background computation keeps going. This is future work: Phase 1
+retains the existing eligibility restriction, and does not preempt running steps.
 
 ### 6.3 Where the speedup comes from — and its limits
 
@@ -242,7 +269,7 @@ while the background computation keeps going.
 |---|---|---|
 | Task parallelism (Phase 1) | Width of the dataflow graph | Typically 2–10 concurrent modules; a linear chain gets 1x |
 | Data parallelism (Phase 2) | Rows per step × mergeable modules | Tens of cores per module, until memory bandwidth saturates |
-| Pipeline parallelism (Phase 3) | Depth of the graph | Small additional factor (≈ chain length) |
+| Pipeline parallelism (Phase 3) | Stage balance and graph depth | Ideal throughput ratio ≤ sum of stage costs / slowest stage cost |
 | Multiple concurrent dataflows / users | Number of sessions | Linear, mostly independent |
 
 Key consequences:
@@ -264,16 +291,51 @@ Key consequences:
   branches; shared producers will reduce it. Numbers on a real many-core
   machine are the first thing to obtain (Phase 1 exit criterion).
 
+### 6.4 Evaluation and acceptance criteria
+
+Compare workers=1 and N on the same build and graph. Include independent
+pipelines, shared-source fan-out, a narrow source-to-reduction chain, unequal
+branch costs, and a realistic notebook receiving interactions during background
+computation. The first four shapes are implemented in `scripts/bench_parallel.py`;
+the interaction workload remains to be built. Distinguish worker threads from
+pytest workers. Record GIL status, numerical-library thread settings, machine
+load, dataset, and warm-up policy. Use at least three repetitions, alternating
+serial/parallel order; retain individual runs, not just their median.
+
+| Metric | Meaning | Current benchmark coverage |
+|---|---|---|
+| Completion wall time and CPU/wall | Throughput and actual CPU use | Implemented |
+| First productive result, per terminal analytic module | Earliest worker output; also report time until all have produced | Implemented; not UI presentation |
+| p95 gaps between productive results | Availability cadence | Implemented; unavailable with fewer than two results |
+| Step p95/max and overruns | Actual duration versus requested quantum | Implemented around `run_step` |
+| First visible result and p50/p95 input-to-visible-update | End-to-end interaction latency | Requires notebook/UI instrumentation and input generation IDs |
+| Ready-to-start delay | Scheduler waiting rather than computation | Pending readiness instrumentation |
+| Time to specified error/quality | Progressive utility | Pending algorithm-specific oracle/target |
+| Peak memory and change-log backlog | Cost of buffering and slow consumers | Pending storage instrumentation |
+
+Example: `python scripts/bench_parallel.py 4 1000000 --repeats 3 --json results.json`.
+The optional independent-scheduler upper-bound comparison remains a single trial;
+`--skip-upper-bound` skips it. The JSON contains the repeated one-scheduler runs.
+Instrumentation wraps steps rather than lifecycle callbacks, since unrestricted
+callbacks require quiescence and would change the scheduling being measured.
+An overrun count describes observed behavior; it does not enforce a deadline.
+
+Phase 1 acceptance requires correctness under controlled adversarial interleavings
+and a declared latency budget for a representative interactive workload, not
+just faster completion. Publish both latency and throughput, with serial
+regressions visible. Do not infer scaling on ≥32 cores from the laptop results;
+those measurements and the interaction budget are still outstanding.
+
 ## 7. Plan
 
 ### Phase 0 — single-threaded fixes and a benchmark — done
 - Done: `PIntSet.__array__`; contiguous `PIntSet`s read as slices.
 - Done: full test suite shows no new failures.
 - Done: `scripts/bench_parallel.py`.
-- Open: investigate the ~20% scheduler idle time.
+- Done: avoid the unnecessary final idle sleep (Finding 4).
 
-### Phase 0.5 — bounded steps and a trustworthy test suite (in progress)
-- Done: per-test timeout (`pytest-timeout`, 600 s) and the scheduler state in
+### Phase 0.5 — test-suite repair done; broader audits remain
+- Done: per-test timeout (`pytest-timeout`, 10 s; 120 s for slow tests) and the scheduler state in
   timeout reports (`tests/conftest.py`), so a hang is a failure with a diagnosis.
 - Done: smaller generated datasets for tests (`PROGRESSIVIS_BIGFILE_ROWS`).
 - Done: vectorize the datetime path of `PTable.append` and `GroupBy` (Finding 5).
@@ -288,44 +350,133 @@ Key consequences:
 - To do: run the CI-skipped tests somewhere (e.g. a scheduled job with cached
   datasets), so they cannot rot silently.
 
-### Phase 1 — task parallelism ("wave" scheduler)
-Current single-thread assumptions to address:
-1. Producers grow output tables in place with `np.resize`
-   (`storage/numpy.py:95`, `table/column.py:345`), which can reallocate under a
-   concurrent reader.
-2. Change tracking (`PTableChanges`, `table/tablechanges.py`) is a
-   producer-owned log mutated by consumers' `slot.update()` in
-   `Module.prepare_run()`.
-3. One global `run_number`, incremented per module call
-   (`core/scheduler.py:435`), drives readiness checks (`core/module.py:966`).
+### Phase 1 — task parallelism (parallel scheduler) — implemented, being validated
+Single-thread assumptions that had to be addressed:
+1. Producers grow output tables in place with `np.resize`, which can
+   reallocate under a concurrent reader. Addressed by never running a module
+   concurrently with a module directly connected to it, preserving producer
+   order and draining each sweep. Aliased views need the ownership contract below.
+2. Change tracking (`PTableChanges`) is a producer-owned log mutated by its
+   consumers. Not only in `prepare_run()`, as first assumed: `@process_slot`
+   also resets and updates slots *inside* `run_step()`. Two consumers of the
+   same table can do so concurrently, so the log is now locked, and a consumer
+   can re-register at an earlier time than another concurrent consumer
+   (bookmarks are reused wherever they are).
+3. One global `run_number`: still assigned serially, in the event loop.
 
-Design:
-- **Select a wave**: ready modules from the toposorted run list such that no
-  two are directly connected (PDS's rule, by construction).
-- **Serial prepare**: on the scheduler thread, assign run numbers and call
-  `prepare_run()` — all change-log mutation stays single-threaded.
-- **Parallel run**: only `run_step()` executes on a thread pool. Producers of a
-  running module are idle (stable inputs); its consumers are idle (no reads of
-  its output mid-write).
-- **Serial finish**: `after_run`, tick procs, tracer, state transitions.
-- **Interaction**: `for_input()` restricts wave eligibility, and can reserve
-  cores for the interactive subgraph instead of pausing the rest.
-- Opt-in `Scheduler(parallel=..., max_workers=...)`; modules can declare
-  themselves not thread-safe (class attribute) to always run alone.
-- Audit global state: name generation, `StorageManager`, tracers, global
-  `np.random` use in `RandomPTable`, datasketches/KLL.
-- CI: add a 3.14t job and run the test suite with the parallel scheduler; fail
-  if the GIL is re-enabled at import.
-- **Exit criterion**: correctness on the full suite in parallel mode; speedup
-  measured on a ≥ 32-core machine for several realistic notebooks (taxi
-  heatmap, scaler demo, PPCA).
+Design as implemented (`Scheduler(workers=N)`, or env `PROGRESSIVIS_WORKERS`;
+default 1 keeps the serial loop unchanged):
+- The sweep visits modules in topological order. A module **starts** on a
+  worker thread as soon as a worker is free and no module directly connected
+  to it is running; otherwise it is **deferred** to later in the same sweep,
+  as is any module whose producer is deferred, so each module still runs
+  after its producers in every sweep.
+- `prepare_run()`, `start_run()`, `after_run()` and tick procs run in the
+  event loop; only `Module.run()` (the step) runs on the thread pool.
+- Scheduling is dynamic **within a sweep**, with a barrier between sweeps.
+  Deferred work is reconsidered before waiting for unrelated running tasks at
+  the sweep boundary. This is not a general priority-ready-queue scheduler.
+- Modules with registered start/after callbacks or subclass overrides of those
+  hooks run exclusively. Tick callbacks wait for all active workers. Graph
+  changes drain the old sweep before reconnection and teardown. Loop/idle hooks
+  execute after the sweep drains. These conservative boundaries may reduce
+  throughput; ordinary callback-free modules retain task parallelism.
+- A first version ran **synchronous waves** (start a set of independent
+  modules, wait for all). Each wave waited for its slowest member, and gave
+  ~1.1x; the initial dynamic version gave ~2.1x on the same dataflow (§5).
+  These historical figures predate the callback-boundary fixes.
+- Interaction: `for_input()` already limits which modules are considered;
+  reserving cores for the interactive subgraph is future work.
+
+Earlier validation: the full test suite passed with 4 workers on 3.14 and
+3.14t, plus dedicated tests (`tests/test_05_parallel_scheduler.py`): directly
+connected modules never run at the same time (the test fails when the
+scheduler is sabotaged), unconnected modules do, and results stay exact and
+prefix-consistent. Running the suite in parallel found three more bugs: the
+change-log ordering above, a module seeding numpy's global random generator,
+and a CSV loader rewinding a stream still read by pyarrow threads (failing on
+free-threaded Python even without the parallel scheduler).
+
+Additional regression tests cover the deferred-consumer delay, lifecycle and
+tick callback overlap, and graph mutation before worker completion. Each fails
+with its protection disabled. Current run counts and remaining failures are
+tracked in `PLAN.md`; passing numerical tests alone is not a safety proof.
+
+#### Phase 1 ownership and lifecycle contract
+
+- A module owns mutations of its outputs and internal state. Inputs are read-only
+  to consumers, except shared change-log operations explicitly synchronized by
+  the framework. Directly connected modules do not run simultaneously.
+- Outputs can alias upstream storage (`PTableSelectedView`, for example).
+  Producer-before-consumer ordering and the sweep barrier protect ordinary
+  ancestor chains. Input mutation through a sibling view or hidden shared state
+  violates the contract; the scheduler does not discover storage aliases.
+  Audit such modules before enabling parallel execution.
+- Register lifecycle callbacks before starting execution. They may access the
+  graph at the conservative boundaries above. Arbitrary background coroutines,
+  notebook readers and module-created threads do not acquire safety merely by
+  running on the event loop; use owned snapshots or arrange a quiescent boundary.
+- Custom `prepare_run`/readiness hooks must respect module-local/input access.
+  Only start/after hook overrides currently trigger exclusive execution.
+  A general per-module capability/opt-out API is still pending; use workers=1
+  when a module cannot meet the contract.
+- A run number is an assigned logical identifier, not a global commit version.
+  Completion order may differ; it must not be used to infer cross-module snapshots.
+
+#### Failure, cancellation and pause contract
+
+Implemented and covered by `tests/test_05_scheduler_lifecycle.py`:
+
+- `stop()` requests a resumable pause. It stops admission of unstarted work;
+  await the existing `start()` task to know active steps have finished. Pending
+  work is reconsidered on the next `start()`. Pausing does not end live modules.
+- Worker or companion-coroutine failure, startup failure, or cancellation of
+  the `start()` task aborts the dataflow. Stop admitting work, cancel and await
+  companion tasks, asynchronously join active workers, then end modules. An
+  aborted scheduler rejects restart: create a fresh scheduler/dataflow because
+  output may be partially mutated and there is no transactional rollback.
+- Cancellation of an asyncio waiter does not stop its OS thread. Worker futures
+  remain supervised until completion. Cleanup runs in a shielded task, so
+  repeated `cancel()` calls do not interrupt joining or module teardown; the
+  event loop remains available while workers finish. A non-returning worker,
+  non-cooperative coroutine, or hanging ending hook can still prevent shutdown.
+- Module ending hooks run once per module instance, after worker quiescence;
+  cancellation during an ending hook awaits that same invocation. Failure in one
+  hook does not prevent cleanup of other modules. The registry uses weak module
+  keys so successful teardown does not retain removed modules indefinitely.
+- Run-state flags and the executor are cleared on exit, including startup errors.
+  A single error propagates unchanged; multiple failures are available through
+  `progressivis.core.scheduler.SchedulerRunError.errors` (compatible with Python
+  3.10). Cancellation remains `CancelledError`, with collected worker/cleanup
+  errors chained as its cause. Completion callbacks do not run for a failed batch.
+- `start(coros=...)` coroutines belong to this run: unfinished companions are
+  cancelled and awaited on normal completion or pause as well as abort. They
+  must cooperate with cancellation and must not assume they outlive the dataflow.
+  Independent work should be created and supervised by its caller instead.
+
+Tests exercise real worker threads, two concurrent worker failures, a companion
+failure, repeated cancellation during work and teardown, startup/final-hook
+failures, normal completion, and pause/resume. A bounded worker in the tests waits
+for an event-loop timer, detecting a blocking join. These checks do not establish
+native-library free-threading safety or bounded shutdown for arbitrary modules.
+
+Remaining: an intermittent KLL sketch test failure seen both with 3.14t /
+4 workers and standard Python / 1 worker (`datasketches` is not declared free-threading-safe, and KLL results also
+depend on chunking; not yet separated); BLAS
+thread control; a CI job on 3.14t; measurements on a ≥ 32-core machine with
+realistic notebooks (exit criterion).
 
 ### Phase 2 — data parallelism inside modules
-- A step's rows are split into k slices processed concurrently, partial results
-  merged. Start with Min/Max, Var (Chan's parallel update), Histogram1D/2D,
-  KLL (sketch merge), Stats.
-- Teach the time predictor about k: step size scales with workers so each
-  quantum still fits its time budget.
+- Define capabilities first: allowed input changes (append/update/delete), input
+  snapshot, partition rule, partial-state ownership, merge operation, numeric
+  tolerance and reproducibility. Mergeability for inserts is not deletion support.
+- Start with append-only Min/Max, Var (Chan's parallel update), and fixed-bin
+  Histogram1D/2D; all partitions must use the same bin boundaries. KLL and more
+  general Stats follow only with dependency safety and approximation contracts.
+- Include partitioning, copying, contention and merging in the time predictor.
+  Measure scaling with k rather than multiplying step size by thread count.
+  Scheduler tasks and BLAS/numerical kernels must share one resource budget;
+  avoid independent nested pools and account for multiple concurrent schedulers.
 - Expected: the main route to tens of cores, bounded by memory bandwidth.
 
 ### Phase 3 — pipeline parallelism
@@ -333,6 +484,16 @@ Design:
   stable prefix can be read while the producer appends.
 - Allow a consumer to run concurrently with its producer on already-committed
   rows (relaxing the Phase 1 adjacency rule).
+- Define committed versions and reader lifetimes. Updates/deletions, selection
+  changes and schema changes require versioning or exclusion; append-only
+  allocation does not solve them. Reclaim chunks only after the last reader.
+- Bound retained chunks and change logs; apply backpressure when consumers lag.
+  Define what a multi-input module may combine and whether it requires matching
+  versions. A slow or abandoned consumer must not retain unbounded memory.
+- First experiment: copy a bounded chunk into consumer-owned memory, then
+  explicitly release its read dependency before computing (PDS `ReleaseInputs`).
+  Measure copy cost, memory and source overlap before changing general storage.
+  This is a future opt-in capability, not an exception to current adjacency rules.
 
 ### Phase 4 — later
 - HyperFlow-style multiple implementations per module (e.g. CuPy), chosen at
@@ -349,16 +510,19 @@ results:
 (0.5 s, 0.1 s in interactive mode) and a time predictor converts it into a
 number of items, assuming cost linear in the items processed. Nothing preempts
 a module that overruns; the quantum holds only if the predictor is right.
-Finding 5 shows two modules where it was not (minutes per step). A sweep of the
-scheduler costs the *sum* of the quanta of the modules that run, so latency
-grows with the number of modules (the paper acknowledges this).
+Finding 5 shows two modules where it was not (minutes per step). In serial mode,
+a sweep costs the sum of actual step durations plus overhead; parallel mode
+depends on dependencies, contention and quiescent boundaries. Neither is an
+end-to-end latency bound, and no running step is preempted for new interaction.
 
 **Intermediate results have prefix semantics, at best.** For exact incremental
 operators (min, max, sum, mean, variance, moments, histograms), the output
 after a step should equal the batch result on the rows consumed so far (a
 *prefix* of the input in arrival order), and the final output should equal the
-batch result. Neither property was stated or tested; the new tests found
-`Var` violating it (Finding 8).
+batch result within a declared floating-point tolerance. With updates/deletions,
+the oracle must instead use the logical state after consumed change events, not
+just a row prefix. The new append-only tests found `Var` violating consistency
+(Finding 8); broad update/delete coverage remains to be added.
 
 **Early pictures are not samples unless the input is shuffled.** The prefix
 is in file order. The NYC taxi files are ordered by time, so the early heatmap
@@ -395,7 +559,7 @@ different progress points.
   free-threading support or the GIL silently returns (datasketches today).
 - **Single-thread overhead of 3.14t** relative to the standard build must be
   measured on our workloads; the parallel scheduler must stay optional.
-- **Determinism**: concurrent waves change step interleaving; tests that depend
+- **Determinism**: concurrent execution changes step interleaving; tests that depend
   on exact step sequences may need tolerance or a deterministic mode. Finding 7
   shows how an edge interleaving (a row arriving in the last step) can hide
   a bug in single-threaded runs; parallel runs will make such cases more frequent.
@@ -403,12 +567,15 @@ different progress points.
   dataflow (Finding 5); parallelism hides this only partially. The timeout
   report should stay in the test suite permanently.
 - **User-written modules** (`doc/custom_modules.md`) may not be thread-safe;
-  the opt-out flag and documentation must make this explicit.
+  a per-module opt-out/capability API remains to be designed. Until then the
+  whole-scheduler workers=1 setting is the fallback.
 - **Bandwidth-bound workloads** may show modest gains on many-core machines;
   set expectations with measured numbers, not core counts.
 
 ## References
 
+- Apache DataSketches. *KLL Sketch Accuracy and Size Vs K and N.*
+  https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html
 - H. T. Vo, J. L. D. Comba, B. Geveci, C. T. Silva. *Streaming-Enabled Parallel
   Data Flow Framework in the Visualization Toolkit.* Computing in Science &
   Engineering, Sept/Oct 2011.

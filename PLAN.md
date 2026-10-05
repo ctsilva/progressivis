@@ -5,6 +5,101 @@ full design: [`design/parallel_progressivis.md`](design/parallel_progressivis.md
 
 Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 
+## Where we stopped (2026-10-05)
+
+- Phase 1 and the design-review follow-up are saved in the working tree, **not
+  committed or pushed**. Preserve the pre-existing Phase 1 changes.
+- Design critique incorporated in `design/parallel_progressivis.md`: PDS data
+  lifetime, ownership and callback contract, sweep barriers, failure/cancellation
+  requirements, statistical caveats, evaluation matrix, and Phase 2/3 contracts.
+- Four scheduler regressions fixed: deferred consumer waiting on unrelated work;
+  lifecycle callbacks overlapping workers; tick callbacks overlapping workers;
+  graph mutation/reconnection before old workers finish. All four regression
+  tests fail with their safeguards disabled. Modules with lifecycle callbacks
+  run exclusively; tick callbacks and graph changes require quiescence.
+- Benchmark now supports repeated/alternating one-scheduler comparisons, narrow
+  and uneven graphs, first-result availability, update gaps, step duration and
+  overruns, and JSON export. Four-shape smoke run and JSON checks pass. These
+  metrics do **not** measure UI interaction latency; see the design evaluation
+  matrix for missing instrumentation.
+- Validation results for this follow-up are recorded below. KLL flakiness also
+  occurred on standard Python with one scheduler worker, so it cannot be
+  attributed exclusively to free-threaded parallel execution.
+- Failure/cancellation cleanup now implemented: supervised worker futures,
+  shielded cleanup, once-only ending hooks, aggregated errors, consistent stopped
+  flags and rejection of aborted-dataflow restart. `stop()` remains resumable;
+  companion coroutines are scoped to the run. Nine lifecycle regression tests.
+- Next: isolate KLL's oracle/approximation issue; audit hidden storage aliases and custom-module access;
+  BLAS thread control and 3.14t CI; interaction benchmarks and ≥32-core evaluation.
+  Then review/commit Phase 1 and decide whether to share Phases 0–0.5 upstream.
+- Run quick tests: `.venv/bin/python -m pytest tests`; parallel scheduler:
+  `PROGRESSIVIS_WORKERS=4 ...`; free-threaded:
+  `PYTHON_GIL=0 PROGRESSIVIS_WORKERS=4 .venv-ft/bin/python -m pytest tests`.
+  pytest's four xdist processes are separate from scheduler workers; `-n 0`
+  disables xdist. Local HTTP tests need permission to bind localhost sockets.
+
+### Code-review fixes (2026-10-05)
+
+- Interactive input state (`_module_selection`) was read and reset by workers
+  (`Module.run` -> `fix_quantum`/`has_input`) while the event loop changed it:
+  possible `TypeError` aborting the scheduler, or a lost selection. The parallel
+  loop now computes the quantum before submitting the step
+  (`Module.run(run_number, quantum=None)`); `fix_quantum` reads one snapshot.
+- Input could change a module during its own step (`Variable.from_input`
+  updates `result` and `_has_input` after `await for_input()`). `for_input()`
+  now waits until that module has no step running on a worker.
+- Two regression tests fail with these fixes disabled. Validation: quick suite
+  563 passed (standard and free-threaded, 1 worker); quick + slow 574 passed
+  (standard and free-threaded, 4 workers); scoped mypy passes.
+
+### Lifecycle validation (2026-10-05)
+
+- Nine new tests in `tests/test_05_scheduler_lifecycle.py` cover cancellation
+  during worker execution and teardown (including repeated cancel calls), late
+  worker errors, concurrent failures, companion failures/termination, startup
+  and final-hook failures, teardown errors and pause/resume.
+- Temporarily restoring legacy run supervision reproduces the cancellation,
+  startup, multiple-error and lingering-companion failures; current source restored.
+- Standard Python, default scheduler: quick suite **561 passed**, 37 skipped,
+  35 subtests passed.
+- Standard Python, four scheduler workers, quick + slow: **572 passed**,
+  37 skipped, 35 subtests passed.
+- Free-threaded Python (`PYTHON_GIL=0`), four scheduler workers: quick suite
+  **561 passed**, 37 skipped, 35 subtests passed; slow suite **11 passed**.
+- Scoped mypy on scheduler and both new test files passes. Benchmark smoke
+  passes all eight graph/worker combinations and produces valid JSON.
+- KLL's earlier intermittent comparison failure did not recur in these runs;
+  it remains unresolved. Both slow-test runs still print native datasketches/
+  nanobind leak diagnostics at process exit.
+- All work remains uncommitted. Next: KLL oracle/dependency investigation,
+  thread-budget control and free-threaded CI, then interactive/many-core evaluation.
+
+### Design-review validation (2026-10-05)
+
+- Four regression protections tested by temporarily disabling them and restoring
+  the source in `finally`: all four fail on the intended ordering assertions.
+- Focused parallel scheduler file: 12 tests and 18 subtests pass (standard Python).
+- Benchmark smoke: `python scripts/bench_parallel.py 2 1000 --repeats 1
+  --skip-upper-bound --json /tmp/progressivis-bench-review.json`; eight runs across
+  four shapes, Python-native JSON scalars and first-result timing order verified.
+  This is an execution check, not performance evidence.
+- Quick suite, standard Python / 1 scheduler worker: 551 passed, 37 skipped,
+  33 subtests passed; known `test_kll3` failed (PMF comparison of two sketches).
+- Quick suite, standard Python / 4 workers: 552 passed, 37 skipped, 33 subtests passed.
+- Quick suite, free-threaded Python / 4 workers: 552 passed, 37 skipped, 33 subtests passed.
+- Quick suite, free-threaded Python / 1 worker: 552 passed, 37 skipped, 33 subtests passed.
+- `test_kll3` passes when rerun alone on standard Python. No KLL code or tolerances changed.
+- Slow suite / 4 workers: 11 passed on standard Python and 11 passed on free-threaded
+  Python. Both runs print datasketches/nanobind leak diagnostics at process exit;
+  passing tests do not resolve native dependency safety.
+- Free-threaded benchmark: K=6, 2,000 rows, two repetitions of fan-out and narrow
+  graphs. JSON verified: eight runs, alternating worker order, GIL disabled,
+  timing order and overrun-count invariants. Again, smoke data only.
+- Scoped mypy (scheduler, benchmark, parallel tests), compilation and diff checks pass.
+- Full-suite runs used four xdist processes; counts above retain skipped tests
+  explicitly. The initial sandbox run could not collect local HTTP tests;
+  subsequent suite runs had localhost access.
+
 ## Environments
 
 - `.venv` — CPython 3.14 (GIL): `uv venv --python 3.14 .venv && uv pip install --python .venv -e '.[test]'`
@@ -30,7 +125,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 
 ## Test suite: never hang, run fast
 
-- [x] Per-test timeout: `pytest-timeout` in `test` extras, `timeout = 600` in `pyproject.toml`
+- [x] Per-test timeout: `pytest-timeout` in `test` extras, 10 s by default, 120 s for slow tests
 - [x] `tests/conftest.py`: on timeout, report lists each module's state and its input slots
 - [x] `bigfile` size configurable: `progressivis.datasets.bigfile_rows()`,
       env `PROGRESSIVIS_BIGFILE_ROWS`; tests default to 100k rows (`tests/__init__.py`);
@@ -86,26 +181,70 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 - ~~`test_03_ppca` (7), `test_03_csv::test_as_array3`, `test_03_threaded_csv::test_read_csv_taxis`~~ — fixed (local data)
 - ~~`test_03_join::test_outer_pu`~~ — fixed (datetime + GroupBy vectorized, pandas 3 cast)
 
-## Phase 1 — task parallelism ("wave" scheduler)
+## Phase 1 — task parallelism (parallel scheduler)
 
-- [ ] Thread-safety audit: name generation, `StorageManager`, tracers, `np.random` in `RandomPTable`, KLL/datasketches
-- [ ] Wave selection: ready modules, no two directly connected
-- [ ] Serial `prepare_run`, parallel `run_step` on a thread pool, serial `after_run`
-- [ ] `Scheduler(parallel=..., max_workers=...)`, opt-out attribute for non-thread-safe modules
-- [ ] Interaction: `for_input()` limits wave eligibility / reserves cores
-- [ ] Control BLAS/numpy threads (oversubscription)
-- [ ] Test suite passes in parallel mode
+- [x] Thread-safety audit: module state is per module (slots, change buffers, tracer, predictor; table
+      names derive from module names). Shared: numpy's global RNG (RandomPTable, Sample, Stirrer, RangeQuery,
+      KernelDensity, BlobsPTable) — thread-safe but order-dependent; mmap temp dir (now locked)
+- [x] `Scheduler(workers=N)` / env `PROGRESSIVIS_WORKERS`; default 1 = unchanged serial loop
+- [x] Dynamic scheduling within sweeps, with a barrier between sweeps: a module starts on a worker as soon as one is free and no directly
+      connected module is running; otherwise it is deferred within the sweep (and so are modules whose
+      producer is deferred). `prepare_run`, `start_run`, `after_run`, tick procs stay in the event loop.
+      (A first version ran synchronous waves: each wave waited for its slowest module, ~1.1x.)
+- [x] Bugs found by running the suite in parallel:
+      - `PTableChanges`: consumers of the same table can reset their slot inside their step; now locked,
+        and a bookmark is reused wherever it is (times are no longer strictly increasing in a sweep)
+      - `MVBlobsPTable` seeded numpy's global RNG: two sources interleaved; now a private RandomState
+        (identical data in serial)
+      - `PACSVLoader` recovery rewound a shared BytesIO while the previous pyarrow reader could still read
+        ahead from it: failed intermittently on free-threaded Python even serially; now an independent BytesIO
+- [x] Earlier test suite passed with `PROGRESSIVIS_WORKERS=4` on 3.14 and 3.14t (548 quick + 11 slow);
+      current follow-up validation is recorded above
+- [x] `tests/test_05_parallel_scheduler.py`: connected modules never overlap (fails when the scheduler is
+      sabotaged), modules do run concurrently, exact results, prefix consistency under parallelism
+- [~] Intermittent failure, first observed with 3.14t + 4 workers and now also standard Python / 1 worker: `test_03_kll::test_kll3` (1 in ~5 full runs).
+      Previously passed 20/20 serially on 3.14; a later full run failed there too. Already skipped on CI ("randomly fails on CI"). Two suspects, not yet
+      separated: (a) datasketches is not free-threading-safe and we force `PYTHON_GIL=0`; (b) the test
+      compares a chunk-by-chunk KLL with a batch KLL, and KLL results depend on chunking (timing).
+      Next: run it 20x on 3.14 with 4 workers, and 20x on 3.14t serially; check `compare()` tolerance
+- [x] Reconsider deferred work before waiting at sweep drain; regression test
+- [x] Quiescent boundaries for start/after callbacks, tick callbacks, graph edits; regression tests
+- [x] Explicit ownership/lifecycle assumptions documented; no general alias enforcement yet
+- [x] Failure/cancellation protocol: stop admission, asynchronously join workers, teardown once,
+      restore state and preserve multiple errors; repeated cancellation cannot interrupt cleanup
+- [x] Preserve stop/resume; scope companion coroutines to each run; reject restart after abort
+- [x] Interactive input with workers: quantum computed in the event loop; `for_input()` waits for
+      the module's running step; regression tests
+- [ ] Audit aliasing views, custom preparation hooks and unsynchronized external readers
+- [ ] Interaction: `for_input()` limits eligibility already (via `_consider_module`); reserve cores later
+- [ ] Control BLAS/numpy threads (oversubscription) — threadpoolctl
 - [ ] CI job on 3.14t; fail if GIL is re-enabled at import
-- [ ] Measure on a ≥ 32-core machine (taxi heatmap, scaler demo, PPCA)
+- [x] Benchmark result availability, update gaps and step overruns; repeated comparisons and JSON
+- [ ] Instrument UI interaction latency, readiness delay, quality targets, memory and change-log backlog
+- [ ] Measure on a ≥ 32-core machine (taxi heatmap, scaler demo, PPCA), including latency criteria
+
+Historical measurement before callback-boundary fixes (one scheduler, 4 workers, 1M rows, busy laptop; `scripts/bench_parallel.py 4 1000000`):
+
+| Dataflow | 3.14 (GIL) | 3.14t (no GIL) |
+|---|---|---|
+| 4 independent pipelines | 1.11x | 2.13x (CPU/wall 3.1) |
+| 1 source → 4 Histogram2D + Min/Max/Var | 1.35x | 1.39x |
+
+Upper bound for 4 pipelines (4 separate schedulers in 4 threads, 3.14t): ~2.3x.
+The fan-out is limited by the source, which runs alone (all its consumers are connected to it): Phase 3.
 
 ## Phase 2 — data parallelism inside modules
 
-- [ ] Split step rows across workers + merge: Min/Max, Var, Histogram1D/2D, KLL, Stats
-- [ ] Time predictor aware of worker count
+- [ ] Module capabilities: append/update/delete, snapshot, partition, merge and numerical tolerance
+- [ ] Start append-only Min/Max, Var and fixed-bin histograms; then KLL/Stats with explicit contracts
+- [ ] Predictor includes partition/copy/merge and measured scaling; shared task/BLAS resource budget
 
 ## Phase 3 — pipeline parallelism
 
 - [ ] Chunked append-only column storage (no `np.resize` reallocation under readers)
+- [ ] Define committed versions, reader lifetimes and reclamation, including updates/deletions/schema changes
+- [ ] Bound buffers and change logs; define slow-consumer backpressure and multi-input consistency
+- [ ] Experiment with bounded input copy and explicit early release before general storage replacement
 - [ ] Allow consumer to run concurrently with producer on committed rows
 
 ## Phase 4 — later
@@ -130,7 +269,24 @@ on a standard build it is a fatal startup error). Single runs vary a lot when ot
 
 ## Log
 
+- 2026-10-05 (lifecycle) — Implemented supervised failure/cancellation cleanup,
+  once-only module ending, multiple-error retention, companion-task cleanup and
+  restart rejection after abort. Preserved resumable stop. Nine real-worker tests;
+  restoring legacy run supervision reproduces the cancellation, startup,
+  multi-error and lingering-companion regressions. Full validation results are
+  recorded in the lifecycle matrix above.
+
+- 2026-10-05 (design review) — Read the supplied CiSE 2011 PDS paper; documented
+  ownership, lifecycle boundaries, remaining failure/cancellation work and
+  statistical limits. Fixed four scheduler ordering regressions with sabotage
+  checks. Added repeated result-availability/overrun benchmarks and JSON export;
+  validated standard/free-threaded execution. See the current validation matrix.
+
 - 2026-10-04 — Compared with PDS/HyperFlow; chose Python + free-threaded 3.14t; found `PIntSet` indexing slowdown; wrote design note; created branch.
+- 2026-10-05 (later) — Test suite: offline data, fixes (Var, imputer, mmap, HTTP server, idle sleep), quick by
+  default (~12 s, 4 xdist workers, 10 s timeout). Finding 7 was Stirrer, not change propagation. Read the
+  ProgressiVis paper: no formal guarantees; added §8 Guarantees to the design note and tests for them.
+  Phase 1 parallel scheduler: waves (~1.1x) replaced by dynamic scheduling within sweeps (~2.1x on 3.14t).
 - 2026-10-05 — Phase 0 fix in place; full suite shows no new failures. Overnight runs hung for hours with no
   output (output piped through `tail`); added per-test timeout + scheduler report, found the datetime slow path.
   Made `bigfile` size configurable (100k in tests): saves ~50 s; the big costs were the two taxi tests and failing downloads.
