@@ -57,6 +57,28 @@ class Stirrer(Module):
         self._update_threshold: Optional[int] = self.params.update_threshold
         self._mode = self.params.mode
         self._steps = 0
+        # explicit rows to delete that could not be deleted yet (not loaded
+        # yet, or loaded in the current step): deleted in a later run
+        self._pending_delete = (
+            PIntSet(self._delete_rows)
+            if isinstance(self._delete_rows, (list, tuple, PIntSet))
+            else PIntSet()
+        )
+
+    def _deletable(self, created: Any = None) -> PIntSet:
+        if not self._pending_delete or self.result is None:
+            return PIntSet()
+        ready = self._pending_delete & self.result.index
+        if created is not None:
+            ready -= PIntSet(created)
+        return ready
+
+    def is_ready(self) -> bool:
+        # stay ready while requested deletions are pending, even when the
+        # input is exhausted; otherwise they would silently never happen
+        if self._deletable():
+            return True
+        return super().is_ready()
 
     def test_delete_threshold(self, val: PIntSet) -> bool:
         if self._delete_threshold is None:
@@ -76,6 +98,12 @@ class Stirrer(Module):
         assert input_slot is not None
         steps = 0
         if not input_slot.created.any():
+            deletable = self._deletable()
+            if deletable:
+                assert self.result is not None
+                del self.result.loc[deletable]
+                self._pending_delete -= deletable
+                return self._return_run_step(self.state_ready, steps_run=len(deletable))
             return self._return_run_step(self.state_blocked, steps_run=0)
         created = input_slot.created.next(length=step_size)
         steps = indices_len(created)
@@ -101,17 +129,15 @@ class Stirrer(Module):
             elif self._delete_rows == "all":
                 delete = before_
             else:
-                delete = self._delete_rows
+                delete = self._deletable(created)
             if delete and self.params.del_twice:
                 mid = len(delete) // 2
                 del self.result.loc[delete[:mid]]
                 del self.result.loc[delete[mid:]]
             elif delete:
-                if PIntSet(delete) in self.result.index and PIntSet(
-                    delete
-                ) not in PIntSet(created):
-                    steps += len(delete)
-                    del self.result.loc[delete]
+                steps += len(delete)
+                del self.result.loc[delete]
+                self._pending_delete -= PIntSet(delete)
         if self._update_rows and len(before_):
             before_ -= PIntSet(delete)
             if isinstance(self._update_rows, int):
@@ -129,7 +155,10 @@ class Stirrer(Module):
             elif updated:
                 steps += len(updated)
                 self.result.loc[fix_loc(updated), [self._update_column]] = [v]
-        return self._return_run_step(self.next_state(input_slot), steps_run=steps)
+        next_state = self.next_state(input_slot)
+        if self._pending_delete:
+            next_state = self.state_ready
+        return self._return_run_step(next_state, steps_run=steps)
 
 
 @def_parameter("update_column", np.dtype(object), "",

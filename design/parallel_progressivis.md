@@ -171,16 +171,22 @@ suite had 29 failures, all also present on `master`: stale expectations (a
 300k-row taxi file that is now downloaded with 512k rows; an aggregator
 renamed `uniq` → `nunique`; a pandas 3 runtime-typing incompatibility), a dead
 download URL (MNIST on datahub.io), a flaky local HTTP server, and two real
-bugs (Finding 5 and Finding 7). Phase 1 needs a test suite that runs these
+bugs (Findings 5 and 7). Phase 1 needs a test suite that runs these
 paths, so cleaning it up comes first.
 
-**Finding 7 — deletions propagate nondeterministically.** In
-`Stirrer → GroupBy → Aggregate`, a deleted row is sometimes subtracted from the
-aggregate and sometimes not, depending on how the run is split into steps
-(timing). `GroupBy` removes the row from its output selection correctly; the
-deletion is lost on the way to `Aggregate`. This is a single-threaded bug
-today, and a warning for Phase 1: change propagation must be correct for
-every interleaving before we add more interleavings.
+**Finding 7 — a requested deletion could silently never happen (fixed).** In
+`Stirrer → GroupBy → Aggregate`, a deleted row was sometimes subtracted from the
+aggregate and sometimes not, depending on how the run was split into steps.
+The first diagnosis (deletions lost between `GroupBy` and `Aggregate`) was
+wrong: change propagation was correct. `Stirrer`, the test module that
+injects deletions, deferred a deletion when the row arrived in the current
+step, then never ran again once its input was exhausted; whether the row
+arrived in the last step depended on timing (its `fixed_step_size` parameter
+has been disabled since 2018). It now keeps pending deletions and stays ready
+until they are applied. The interleaving test deletes both an early row and
+the last row under random step sizes, and fails on the old code. The lesson
+for Phase 1 stands: results must not depend on the interleaving, and tests
+must force the edge interleavings (last step, empty steps) on purpose.
 
 **Finding 8 — the `Var` module returned wrong variances.** On uniform data it
 reported 0.074 instead of 0.083 after 20k rows. Column views report `len()`
@@ -277,8 +283,7 @@ Key consequences:
   listed in Findings 4 and 8.
 - Done: prefix-consistency and interleaving tests
   (`tests/test_04_progressive_guarantees.py`).
-- To do: fix nondeterministic deletion propagation (Finding 7); the test is
-  marked as an expected failure until then.
+- Done: Finding 7 fixed (`Stirrer` pending deletions); no expected failures left.
 - To do: audit other modules for row-by-row loops in `run_step`.
 - To do: run the CI-skipped tests somewhere (e.g. a scheduled job with cached
   datasets), so they cannot rot silently.
@@ -352,8 +357,8 @@ grows with the number of modules (the paper acknowledges this).
 operators (min, max, sum, mean, variance, moments, histograms), the output
 after a step should equal the batch result on the rows consumed so far (a
 *prefix* of the input in arrival order), and the final output should equal the
-batch result. Neither property is stated or tested, and Finding 7 shows the
-delta machinery does not always deliver it when rows are deleted.
+batch result. Neither property was stated or tested; the new tests found
+`Var` violating it (Finding 8).
 
 **Early pictures are not samples unless the input is shuffled.** The prefix
 is in file order. The NYC taxi files are ordered by time, so the early heatmap
@@ -392,7 +397,8 @@ different progress points.
   measured on our workloads; the parallel scheduler must stay optional.
 - **Determinism**: concurrent waves change step interleaving; tests that depend
   on exact step sequences may need tolerance or a deterministic mode. Finding 7
-  shows interleaving-dependent results already exist single-threaded.
+  shows how an edge interleaving (a row arriving in the last step) can hide
+  a bug in single-threaded runs; parallel runs will make such cases more frequent.
 - **Unbounded steps**: one module with a row-by-row loop stalls the whole
   dataflow (Finding 5); parallelism hides this only partially. The timeout
   report should stay in the test suite permanently.

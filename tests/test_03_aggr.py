@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 import os
 from . import ProgressiveTest, skipIf, taxi_sample
@@ -77,11 +76,6 @@ class TestProgressiveAggregate(ProgressiveTest):
             "RateCodeID_count_distinct is not equal"
         )
 
-    @pytest.mark.xfail(
-        reason="Finding 7: deletions sometimes do not reach Aggregate through "
-        "GroupBy (see tests/test_04_progressive_guarantees.py)",
-        strict=False,
-    )
     def test_aggregate_1_col_delete(self) -> None:
         s = self.scheduler
         removed = 11142

@@ -41,10 +41,11 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 - [x] Stale test expectations: taxi file now 512k rows (groupby reads count from file metadata,
       expected group count from pandas); `"uniq"` → `"nunique"` in `test_03_aggr`;
       `cast(pd.Index[Any], …)` breaks at runtime with pandas 3 (quoted) in `test_03_join`
-- [ ] **Real bug:** deletions propagate nondeterministically in `Stirrer → GroupBy → Aggregate`
-      (`test_03_aggr::test_aggregate_1_col_delete`, fails on master too). Sometimes the deleted value is
-      subtracted, sometimes not, depending on step timing. GroupBy updates its selection correctly; the
-      deletion is lost on the way to Aggregate (selected-view change manager?). Repro: run the test 3 times.
+- [x] Finding 7: `test_03_aggr::test_aggregate_1_col_delete` failed depending on timing. Not change
+      propagation: `Stirrer` deferred a deletion when the row arrived in the current step and never ran again
+      once its input was exhausted. Now keeps pending deletions (`table/stirrer.py`). Interleaving test deletes
+      an early row and the last row under random step sizes; fails on the old code
+- [ ] `Stirrer`'s `fixed_step_size` parameter is disabled (`if ... and False`, since 2018); 10 tests pass it
 - [ ] 11 test classes are skipped on CI (`skipIf(os.getenv("CI"))`) — that is why CI is green. Several no
       longer need to be (no downloads, fast); review and re-enable
 - [x] Smaller, offline test data: `digits` dataset (20k jittered sklearn 8x8 digits, no download) replaces
@@ -64,7 +65,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
       now converted to arrays. Found by the new prefix-consistency test.
 - [ ] Trap to review: `PColumnSelectedView.__len__` returns `last_id + 1`, not the number of selected rows
 - [x] `tests/test_04_progressive_guarantees.py`: prefix consistency (Min, Max, Var, 3 random step-size seeds
-      each), eventual exactness, interleaving independence (GroupBy→Aggregate with delete: xfail, Finding 7)
+      each), eventual exactness, interleaving independence (Stirrer→GroupBy→Aggregate with deletions)
 
 - [x] Quick by default: `pytest tests` runs 538 tests in ~12 s (was 18 min).
       - 10 tests over 1 s are marked `slow` and skipped (`pytest -m slow` runs them, `-m ''` runs all)
@@ -78,7 +79,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` to do
 ### Known failures on master (macOS, Python 3.14, pandas 3.0.6, pyarrow 25)
 
 - ~~`test_00_storageengine::test_storage_engines`~~ — fixed
-- ~~`test_03_aggr` (2)~~ — fixed `"uniq"`; `_delete` is the real bug above
+- ~~`test_03_aggr` (2)~~ — fixed (`"uniq"`; `_delete`: Finding 7)
 - ~~`test_03_groupby` (5)~~ — fixed (stale expectations)
 - ~~`test_03_recoverable_csv` (8)~~ — fixed
 - ~~`test_03_csv_over_http`~~ — fixed (test server)

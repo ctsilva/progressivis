@@ -13,11 +13,9 @@ Step sizes are randomized (with fixed seeds) to exercise many interleavings.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
-import pytest
-
 from . import ProgressiveTest
 from progressivis import Max, Min, RandomPTable, Scheduler, Sink, Var
 from progressivis.core import aio
@@ -106,17 +104,25 @@ class TestPrefixConsistency(ProgressiveTest):
                 )
 
 
-def _aggregate_with_delete(seed: int, removed: int) -> Dict[int, float]:
-    "RandomPTable -> Stirrer (deletes one row) -> GroupBy -> Aggregate(sum)"
+def _aggregate_with_delete(seed: int, removed: int) -> Tuple[Dict[float, float], Dict[float, float]]:
+    """
+    RandomPTable -> Stirrer (deletes one row) -> GroupBy -> Aggregate(sum),
+    with random step sizes. Returns (progressive result, batch result on the
+    table after the deletion). The data is the same for every seed.
+    """
+    np.random.seed(42)
     s = Scheduler()
     source = RandomPTable(
-        2, rows=ROWS, random=lambda size: np.asarray(np.random.randint(0, 5, size=size), dtype="float64"),
+        2,
+        rows=ROWS,
+        random=lambda size: np.asarray(np.random.randint(0, 5, size=size), dtype="float64"),
         scheduler=s,
     )
     stirrer = Stirrer(
         update_column="_2", delete_rows=[removed], fixed_step_size=1000, scheduler=s
     )
     stirrer.input[0] = source.output.result
+    _random_steps(stirrer, seed + 200)
     grby = GroupBy(by="_1", scheduler=s)
     grby.input.table = stirrer.output.result
     _random_steps(grby, seed)
@@ -127,23 +133,29 @@ def _aggregate_with_delete(seed: int, removed: int) -> Dict[int, float]:
     sink.input.inp = aggr.output.result
     aio.run(s.start())
     assert isinstance(aggr.result, PTable) and stirrer.result is not None
-    return dict(
+    assert removed not in stirrer.result.index, "the requested row was not deleted"
+    got = dict(
         zip(aggr.result["_1"].value.tolist(), aggr.result["_2_sum"].value.tolist())
     )
+    after = stirrer.result.to_array()
+    expected: Dict[float, float] = {}
+    for key, value in after:
+        expected[key] = expected.get(key, 0.0) + value
+    return got, expected
 
 
 class TestInterleavingIndependence(ProgressiveTest):
-    @pytest.mark.xfail(
-        reason="Finding 7: deletions sometimes do not reach Aggregate through "
-        "GroupBy; the result depends on the step interleaving",
-        strict=False,
-    )
     def test_groupby_aggregate_with_delete(self) -> None:
-        results = [_aggregate_with_delete(seed, removed=1234) for seed in range(5)]
-        for r in results[1:]:
-            self.assertEqual(r.keys(), results[0].keys())
-            for k in r:
-                self.assertAlmostEqual(r[k], results[0][k])
+        "Whatever the step sizes, the result equals the batch result after deletion"
+        # the last row always arrives in the last step: deleting it is the
+        # case that used to be lost (Stirrer deferred it, then never ran again)
+        for removed in (1234, ROWS - 1):
+            for seed in range(3):
+                with self.subTest(removed=removed, seed=seed):
+                    got, expected = _aggregate_with_delete(seed, removed=removed)
+                    self.assertEqual(sorted(got), sorted(expected))
+                    for k in got:
+                        self.assertAlmostEqual(got[k], expected[k])
 
 
 if __name__ == "__main__":
